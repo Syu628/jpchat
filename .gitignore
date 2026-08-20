@@ -1,0 +1,23 @@
+# ビルド関連
+JpChatTranslator/
+build_log.txt
+
+# Python キャッシュ
+__pycache__/
+
+# Python版（C#に移行済み）
+translator.pyw
+color_picker.pyw
+start_translator.bat
+
+# 自動生成される通信ファイル
+input.lua
+output.lua
+send_input.lua
+send_output.lua
+
+# ユーザー設定（各自の環境で生成される）
+jpchat_settings.lua
+
+# ログ
+*.log

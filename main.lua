@@ -1,0 +1,326 @@
+local api          = require("api")
+local ui           = require("jpchat/ui")
+local settings     = require("jpchat/settings")
+local settingsPage = require("jpchat/settings_page")
+
+local jpchat_addon = {
+    name    = "jpchat",
+    author  = "Syu",
+    version = "1.0.0",
+    desc    = "Chat translation addon. Displays Japanese translations in a window.",
+}
+
+-- ============================================================================
+-- 設定
+-- ============================================================================
+
+local INPUT_FILE      = "jpchat/input.lua"
+local OUTPUT_FILE     = "jpchat/output.lua"
+local SEND_INPUT_FILE = "jpchat/send_input.lua"   -- 送信用: Lua→Python（日本語）
+local SEND_OUTPUT_FILE = "jpchat/send_output.lua"  -- 送信用: Python→Lua（英語翻訳済み）
+local POLL_INTERVAL   = 100  -- ミリ秒
+
+-- CHAT_MESSAGE の arg展開: channel, unit, isHostile, name, message
+local CHANNEL_LABEL = {
+    [0]  = "Say",
+    [1]  = "Zone",
+    [2]  = "Trade",
+    [4]  = "Party",
+    [5]  = "Raid",
+    [6]  = "Nation",
+    [7]  = "Guild",
+    [9]  = "Family",
+    [10] = "RaidLeader",
+    [11] = "Trial",
+    [14] = "Faction",
+    [-3] = "Whisper",
+}
+
+-- ============================================================================
+-- 内部状態
+-- ============================================================================
+
+local cantReadWindow = nil
+local clockTimer     = 0
+local lastOutput     = ""
+local pendingItems   = {}  -- 翻訳待ちアイテム情報キュー
+local lastSender     = ""  -- 重複チェック用
+local lastMessage    = ""  -- 重複チェック用
+
+-- ============================================================================
+-- アイテムリンク解決
+-- ============================================================================
+-- メッセージ内の |iItemID,...; 形式のリンクを [アイテム名] に置換する
+-- itemGrade に応じた等級マーカーを付加し、アイテム情報リストを返す
+
+local GRADE_MARKER = {
+    [0]  = "",        -- Basic（一般）
+    [1]  = "",        -- Grand（高級）
+    [2]  = "",        -- Rare（希少）
+    [3]  = "",        -- Arcane（古代）
+    [4]  = "",        -- Heroic（英雄）
+    [5]  = "",        -- Heroic（英雄）
+    [6]  = "",        -- Unique（唯一）
+    [7]  = "",        -- Celestial（天上）
+    [8]  = "",        -- Divine（神聖）
+    [9]  = "",        -- Epic（叙事）
+    [10] = "",        -- Legendary（伝説）
+    [11] = "",        -- Mythic（神話）
+}
+
+-- gradeColor 文字列 "FFRRGGBB" を {r, g, b, 1} テーブルに変換
+local function ParseGradeColor(hexStr)
+    if hexStr == nil or #hexStr < 8 then return nil end
+    -- "FFBA976D" → skip first 2 (alpha), take RRGGBB
+    local r = tonumber(hexStr:sub(3, 4), 16)
+    local g = tonumber(hexStr:sub(5, 6), 16)
+    local b = tonumber(hexStr:sub(7, 8), 16)
+    if r and g and b then
+        return { r / 255, g / 255, b / 255, 1 }
+    end
+    return nil
+end
+
+-- resolvedItems: 呼び出し後にアイテム情報が格納されるテーブル（外から参照）
+local lastResolvedItems = {}
+
+local function resolveItemLinks(msg)
+    lastResolvedItems = {}
+    local resolved = string.gsub(msg, "|i(%d+)([^;]*);", function(idStr, rest)
+        local itemId = tonumber(idStr)
+        if itemId == nil then return "[Item]" end
+
+        local info = api.Item:GetItemInfoByType(itemId)
+        if info and info.name and info.name ~= "" then
+            local marker = ""
+            local grade = tonumber(info.itemGrade)
+            if grade and GRADE_MARKER[grade] then
+                marker = GRADE_MARKER[grade]
+            end
+            -- アイテム情報を保存（等級色付き表示用）
+            local color = ParseGradeColor(info.gradeColor)
+            table.insert(lastResolvedItems, {
+                name   = marker .. info.name,
+                color  = color or {1, 1, 1, 1},
+            })
+            if marker ~= "" then
+                return "[" .. marker .. info.name .. "]"
+            end
+            return "[" .. info.name .. "]"
+        end
+        return "[Item#" .. idStr .. "]"
+    end)
+    return resolved
+end
+
+-- 直前の resolveItemLinks で抽出されたアイテム情報を返す
+local function getLastResolvedItems()
+    return lastResolvedItems
+end
+
+-- ============================================================================
+-- チャット受信 → input.lua に書き出す
+-- ============================================================================
+
+local function writeChatToFile(channel, unit, isHostile, name, message)
+    if unit == "player" then return end
+    if name == nil or name == "" then return end
+    if message == nil or #message <= 0 then return end
+
+    -- 同一人物 + 同一メッセージの連投をスキップ
+    if name == lastSender and message == lastMessage then return end
+    lastSender  = name
+    lastMessage = message
+
+    local channelId   = tonumber(channel)
+    local channelName = CHANNEL_LABEL[channelId]
+    if channelName == nil then return end
+
+    -- 設定で非表示に指定されているチャンネルは翻訳リクエストを送らない
+    if not settings.GetVisible(channelName) then return end
+
+    -- アイテムリンクを名前に置換してから書き出す
+    local resolvedMsg = resolveItemLinks(message)
+    local items = getLastResolvedItems()
+
+    -- "x " で始まる短いメッセージ（レイド参加表明等）は翻訳せず直接表示
+    -- "wts" / "wtb" で始まるメッセージも翻訳せず直接表示
+    local lower = string.lower(resolvedMsg)
+    if string.sub(lower, 1, 2) == "x "
+        or string.sub(lower, 1, 4) == "wts "
+        or string.sub(lower, 1, 4) == "wtb "
+        or lower == "wts"
+        or lower == "wtb" then
+        local label = "[" .. channelName .. "]"
+        local itemColorMap = {}
+        for _, item in ipairs(items) do
+            itemColorMap[item.name] = item.color
+        end
+        ui.AddMessageWithItems(label, name, channelName, resolvedMsg, resolvedMsg, itemColorMap)
+        return
+    end
+
+    -- アイテム情報をキューに保存（翻訳結果受信時に取り出す）
+    table.insert(pendingItems, items)
+
+    local msg = string.format("[[JPCHAT||||%s||||%s||||%s]]", channelName, name, resolvedMsg)
+    api.File:Write(INPUT_FILE, { chatMsg = msg })
+end
+
+-- ============================================================================
+-- output.lua をポーリング → UIウィンドウに表示
+-- ============================================================================
+
+local function readTranslation()
+    local data = api.File:Read(OUTPUT_FILE)
+    if data == nil then return end
+    if data.chatMsg == nil or data.chatMsg == "" then return end
+
+    local translated = data.chatMsg
+    if translated == lastOutput then return end
+    lastOutput = translated
+
+    -- output形式: "Channel|||Sender|||翻訳テキスト|||原文"
+    -- "|||" を固定セパレーターとして最大4分割する
+    local function splitNext(s)
+        local p1, p2 = string.find(s, "|||", 1, true)
+        if p1 then
+            return string.sub(s, 1, p1 - 1), string.sub(s, p2 + 1)
+        end
+        return s, ""
+    end
+
+    local colKey, sender, text, original
+    local rest
+    colKey, rest   = splitNext(translated)
+    sender, rest   = splitNext(rest)
+    text,   rest   = splitNext(rest)
+    original = rest  -- 4フィールド目が原文（旧フォーマット時は空）
+
+    if colKey == "" then colKey = "Say" end
+
+    local label = "[" .. colKey .. "]"
+
+    -- colKey をそのまま渡して ui 側で色を引く。original はツールチップ用
+    -- キューからアイテム色情報を取り出す
+    local itemColorMap = {}
+    if #pendingItems > 0 then
+        local items = table.remove(pendingItems, 1)
+        if items then
+            for _, item in ipairs(items) do
+                itemColorMap[item.name] = item.color
+            end
+        end
+    end
+
+    -- アイテム色マップがあればオーバーレイ表示、なければ通常表示
+    ui.AddMessageWithItems(label, sender, colKey, text, original, itemColorMap)
+
+    -- 読んだら空にする
+    api.File:Write(OUTPUT_FILE, { chatMsg = "" })
+end
+
+-- ============================================================================
+-- 送信翻訳結果をポーリング → 血盟チャットに送信
+-- ============================================================================
+
+local lastSendOutput = ""
+
+local function readSendTranslation()
+    local data = api.File:Read(SEND_OUTPUT_FILE)
+    if data == nil then return end
+    if data.chatMsg == nil or data.chatMsg == "" then return end
+
+    local translated = data.chatMsg
+    if translated == lastSendOutput then return end
+    lastSendOutput = translated
+
+    -- 翻訳結果をUIウィンドウに表示（クリップボードにコピー済み）
+    ui.AddMessage("[Send]", "\226\134\146", "Say", translated, "")
+
+    -- 読んだら空にする
+    api.File:Write(SEND_OUTPUT_FILE, { chatMsg = "" })
+end
+
+-- ============================================================================
+-- UPDATE ループ
+-- ============================================================================
+
+local function OnUpdate(dt)
+    clockTimer = clockTimer + dt
+    if clockTimer > POLL_INTERVAL then
+        clockTimer = 0
+        readTranslation()
+        readSendTranslation()
+    end
+    -- リサイズ処理（ドラッグ中のみ動作）
+    ui.OnUpdate()
+end
+
+-- ============================================================================
+-- OnLoad / OnUnload
+-- ============================================================================
+
+local function OnLoad()
+    -- 設定を読み込む
+    settings.Load()
+
+    -- === フォントサイズ変更テスト ===
+    -- style:SetFontSize が使えるかテスト（UI Init 後に実行）
+    -- === テストここまで ===
+
+    -- ui に設定モジュールと設定ページ開き関数を注入
+    ui.SetSettings(settings)
+    ui.SetSettingsOpener(function() settingsPage.Open() end)
+
+    -- 設定ページに設定モジュールと色更新・透過率コールバックを注入
+    settingsPage.Init(settings, function() ui.RefreshColors() end, function(a) ui.SetOpacity(a) end, function(s) ui.SetFontSize(s) end)
+
+    -- UI ウィンドウを構築
+    ui.Init()
+
+    -- 送信機能のコールバックをUIに注入
+    ui.SetSendHandler(function(text)
+        -- 日本語テキストを send_input.lua に書き出す → Python が翻訳して返す
+        api.File:Write(SEND_INPUT_FILE, { chatMsg = text })
+    end)
+
+    -- チャット受信キャンバスを作成
+    cantReadWindow = api.Interface:CreateEmptyWindow("jpchatCanvas")
+
+    function cantReadWindow:OnEvent(event, ...)
+        if event == "CHAT_MESSAGE" then
+            if arg ~= nil then
+                writeChatToFile(unpack(arg))
+            end
+        end
+    end
+    cantReadWindow:SetHandler("OnEvent", cantReadWindow.OnEvent)
+    cantReadWindow:RegisterEvent("CHAT_MESSAGE")
+
+    api.On("UPDATE", OnUpdate)
+
+    -- 通信ファイルを初期化
+    api.File:Write(INPUT_FILE,       { chatMsg = "" })
+    api.File:Write(OUTPUT_FILE,      { chatMsg = "" })
+    api.File:Write(SEND_INPUT_FILE,  { chatMsg = "" })
+    api.File:Write(SEND_OUTPUT_FILE, { chatMsg = "" })
+
+    api.Log:Info("[jpchat] Loaded. Run translator.py to enable translations.")
+end
+
+local function OnUnload()
+    api.On("UPDATE", function() return end)
+    if cantReadWindow then
+        cantReadWindow:ReleaseHandler("OnEvent")
+        api.Interface:Free(cantReadWindow)
+        cantReadWindow = nil
+    end
+    settingsPage.Shutdown()
+    ui.Shutdown()
+end
+
+jpchat_addon.OnLoad  = OnLoad
+jpchat_addon.OnUnload = OnUnload
+
+return jpchat_addon
