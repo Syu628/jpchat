@@ -139,6 +139,9 @@ local function writeChatToFile(channel, unit, isHostile, name, message)
     -- 設定で非表示に指定されているチャンネルは翻訳リクエストを送らない
     if not settings.GetVisible(channelName) then return end
 
+    -- NPC名リストに登録されていれば完全にスキップ（翻訳もウィンドウ表示もしない）
+    if settings.IsNpc(name) then return end
+
     -- アイテムリンクを名前に置換してから書き出す
     local resolvedMsg = resolveItemLinks(message)
     local items = getLastResolvedItems()
@@ -281,8 +284,15 @@ local function OnLoad()
 
     -- 送信機能のコールバックをUIに注入
     ui.SetSendHandler(function(text)
-        -- 日本語テキストを send_input.lua に書き出す → Python が翻訳して返す
+        -- 日本語テキストを send_input.lua に書き出す → 翻訳エンジンが翻訳して返す
         api.File:Write(SEND_INPUT_FILE, { chatMsg = text })
+    end)
+
+    -- NPC登録コールバックをUIに注入
+    ui.SetNpcRegisterHandler(function(name)
+        settings.AddNpc(name)
+        settings.Save()
+        api.Log:Info("[jpchat] NPCとして登録: " .. name)
     end)
 
     -- チャット受信キャンバスを作成

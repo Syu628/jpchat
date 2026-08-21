@@ -226,6 +226,7 @@ local function BuildDisplayLines()
                 original    = (idx == 1) and msg.original or "",
                 customColor = msg.customColor,
                 itemRanges  = lineRanges,
+                sender      = msg.sender or "",
             })
             byteOffset = byteOffset + lineLen
         end
@@ -429,6 +430,7 @@ local settingsPageOpen = nil
 local btnToggle        = nil
 local sendHandler      = nil  -- 送信コールバック（main.lua から注入）
 local sendEditWidget   = nil  -- 入力欄（リサイズ連動用）
+local npcRegisterHandler = nil -- NPC登録コールバック（main.lua から注入）
 
 local function SetBodyVisible(visible)
     bodyVisible = visible
@@ -695,6 +697,10 @@ function M.SetSendHandler(fn)
     sendHandler = fn
 end
 
+function M.SetNpcRegisterHandler(fn)
+    npcRegisterHandler = fn
+end
+
 function M.Init()
     -- フォントサイズに応じて行高さを設定
     UpdateLineHeight()
@@ -777,6 +783,7 @@ function M.AddMessage(label, sender, colKey, translated, original)
         full     = full,
         colKey   = colKey,
         original = original or "",
+        sender   = sender or "",
     })
 
     while #messages > MAX_MSGS do

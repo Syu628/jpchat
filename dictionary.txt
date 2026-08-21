@@ -1,0 +1,16 @@
+# JP Chat Translator 辞書ファイル
+# 形式: 英語=日本語（1行1エントリ）
+# 翻訳前に略語に置換してからGoogle翻訳に渡します
+# '#' で始まる行はコメント
+#
+# 例:
+
+mm=mistmerrow
+lfg=Let's Fucking Go
+gs=gear score
+LMAO=www
+LMFAO=www
+ty=thank you
+np=no problem
+ppl=people
+inno=innocent

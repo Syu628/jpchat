@@ -30,7 +30,21 @@ local opacity  = DEFAULT_OPACITY
 local fontSize = DEFAULT_FONTSIZE
 local visible  = {}  -- チャンネルキー → bool（true=表示、false=非表示）
 local winPos   = nil -- ウィンドウ位置・サイズ { x, y, w, h } （nil = デフォルト位置）
-
+npcList = {
+--ルル
+["Auctioneer"] = true,
+["kim"] = true,
+--ガード
+["Guard"] = true,
+["Sentry"] = true,
+--ヌイ
+["Teemple Priestess"] = true,
+--家具の雑貨商
+["Hotal"] = true,
+--コミュニティセンター
+["Community Center Manager Dumo"] = true,    --Lylyut
+["Community Center Manager Olivian"] = true, --karksa
+}
 for k, v in pairs(DEFAULTS) do
     colors[k]  = { v[1], v[2], v[3], v[4] }
     visible[k] = true  -- デフォルトはすべて表示
@@ -43,7 +57,7 @@ end
 local M = {}
 
 function M.Save()
-    api.File:Write(SAVE_PATH, { colors = colors, opacity = opacity, visible = visible, winPos = winPos, fontSize = fontSize })
+    api.File:Write(SAVE_PATH, { colors = colors, opacity = opacity, visible = visible, winPos = winPos, fontSize = fontSize, npcList = npcList })
 end
 
 function M.Load()
@@ -79,6 +93,14 @@ function M.Load()
     -- フォントサイズ
     if type(data.fontSize) == "number" then
         fontSize = data.fontSize
+    end
+    -- NPC名リスト
+    if type(data.npcList) == "table" then
+        for k, v in pairs(data.npcList) do
+            if v == true then
+                npcList[k] = true
+            end
+        end
     end
 end
 
@@ -166,6 +188,26 @@ end
 
 function M.GetDefaultFontSize()
     return DEFAULT_FONTSIZE
+end
+
+-- ============================================================================
+-- NPC名リストの取得 / 追加 / 判定
+-- ============================================================================
+
+function M.IsNpc(name)
+    return npcList[name] == true
+end
+
+function M.AddNpc(name)
+    npcList[name] = true
+end
+
+function M.RemoveNpc(name)
+    npcList[name] = nil
+end
+
+function M.GetNpcList()
+    return npcList
 end
 
 return M
