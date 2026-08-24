@@ -15,9 +15,13 @@ input.lua
 output.lua
 send_input.lua
 send_output.lua
+heartbeat.lua
 
 # ユーザー設定（各自の環境で生成される）
 jpchat_settings.lua
+deepl_api_key.txt
+llm_settings.txt
 
 # ログ
 *.log
+deepl_active_key.txt

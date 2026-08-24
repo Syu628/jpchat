@@ -6,7 +6,7 @@ local settingsPage = require("jpchat/settings_page")
 local jpchat_addon = {
     name    = "jpchat",
     author  = "Syu",
-    version = "1.0.0",
+    version = "1.1.0",
     desc    = "Chat translation addon. Displays Japanese translations in a window.",
 }
 
@@ -14,11 +14,12 @@ local jpchat_addon = {
 -- 設定
 -- ============================================================================
 
-local INPUT_FILE      = "jpchat/input.lua"
-local OUTPUT_FILE     = "jpchat/output.lua"
-local SEND_INPUT_FILE = "jpchat/send_input.lua"   -- 送信用: Lua→Python（日本語）
-local SEND_OUTPUT_FILE = "jpchat/send_output.lua"  -- 送信用: Python→Lua（英語翻訳済み）
-local POLL_INTERVAL   = 100  -- ミリ秒
+local INPUT_FILE       = "jpchat/input.lua"
+local OUTPUT_FILE      = "jpchat/output.lua"
+local SEND_INPUT_FILE  = "jpchat/send_input.lua"
+local SEND_OUTPUT_FILE = "jpchat/send_output.lua"
+local HEARTBEAT_FILE   = "jpchat/heartbeat.lua"
+local POLL_INTERVAL    = 100  -- ミリ秒
 
 -- CHAT_MESSAGE の arg展開: channel, unit, isHostile, name, message
 local CHANNEL_LABEL = {
@@ -34,8 +35,8 @@ local CHANNEL_LABEL = {
     [10] = "RaidLeader",
     [11] = "Trial",
     [14] = "Faction",
-    [-3] = "Whisper",   -- ささやき（相手から）
-    [-4] = "Whisper",   -- ささやき（自分から送る）
+    [-3] = "Whisper",      -- ささやき（相手から）
+    [-4] = "WhisperTo",   -- ささやき（自分から送る）
 }
 
 -- ============================================================================
@@ -48,6 +49,50 @@ local lastOutput     = ""
 local pendingItems   = {}  -- 翻訳待ちアイテム情報キュー
 local lastSender     = ""  -- 重複チェック用
 local lastMessage    = ""  -- 重複チェック用
+
+-- 翻訳エンジン状態管理
+local MODE_IDLE      = 0
+local MODE_TRANSLATE = 1
+local engineMode     = MODE_IDLE
+local waitingResponse = false  -- input.lua 書き込み後、応答待ち中か
+local noResponseTime = 0      -- 応答待ち開始からの経過時間(ms)
+local NO_RESPONSE_TIMEOUT = 3000  -- 3秒間応答なしでIDLEに戻る
+local hbCheckTimer   = 0   -- ハートビート確認用タイマー
+local HB_CHECK_INTERVAL = 5000  -- 5秒ごとにハートビート確認
+
+-- ============================================================================
+-- 日本語判定
+-- ============================================================================
+-- UTF-8 でひらがな・カタカナが含まれるかチェック
+-- ひらがな: U+3040-U+309F → UTF-8: E3 81 80 - E3 82 9F
+-- カタカナ: U+30A0-U+30FF → UTF-8: E3 82 A0 - E3 83 BF
+
+local function containsJapanese(text)
+    local i = 1
+    while i <= #text do
+        local b = string.byte(text, i)
+        if b >= 0xE3 and i + 2 <= #text then
+            local b2 = string.byte(text, i + 1)
+            local b3 = string.byte(text, i + 2)
+            -- ひらがな: E3 81 80 ~ E3 82 9F
+            if b == 0xE3 and b2 == 0x81 and b3 >= 0x80 then return true end
+            if b == 0xE3 and b2 == 0x82 and b3 <= 0x9F then return true end
+            -- カタカナ: E3 82 A0 ~ E3 83 BF
+            if b == 0xE3 and b2 == 0x82 and b3 >= 0xA0 then return true end
+            if b == 0xE3 and b2 == 0x83 then return true end
+            i = i + 3
+        elseif b >= 0xF0 then
+            i = i + 4
+        elseif b >= 0xE0 then
+            i = i + 3
+        elseif b >= 0xC0 then
+            i = i + 2
+        else
+            i = i + 1
+        end
+    end
+    return false
+end
 
 -- ============================================================================
 -- アイテムリンク解決
@@ -120,6 +165,16 @@ local function getLastResolvedItems()
     return lastResolvedItems
 end
 
+-- チャンネル名から表示ラベルを生成（名前の開始位置を揃える）
+local CHANNEL_DISPLAY = {
+    Whisper   = "[W From]",
+    WhisperTo = "[W To  ]",
+}
+
+local function makeLabel(channelName)
+    return CHANNEL_DISPLAY[channelName] or ("[" .. channelName .. "]")
+end
+
 -- ============================================================================
 -- チャット受信 → input.lua に書き出す
 -- ============================================================================
@@ -129,47 +184,72 @@ local function writeChatToFile(channel, unit, isHostile, name, message)
     if name == nil or name == "" then return end
     if message == nil or #message <= 0 then return end
 
+    local channelId   = tonumber(channel)
+    local channelName = CHANNEL_LABEL[channelId]
+    if channelName == nil then return end
+
+    -- WhisperTo は設定上 Whisper と共通（色・表示/非表示）
+    local colorKey = channelName
+    if channelName == "WhisperTo" then colorKey = "Whisper" end
+
+    -- NPC名リストに登録されていれば完全にスキップ（翻訳もウィンドウ表示もしない）
+    if settings.IsNpc(name) then return end
+
     -- 同一人物 + 同一メッセージの連投をスキップ
     if name == lastSender and message == lastMessage then return end
     lastSender  = name
     lastMessage = message
 
-    local channelId   = tonumber(channel)
-    local channelName = CHANNEL_LABEL[channelId]
-    if channelName == nil then return end
-
-    -- 設定で非表示に指定されているチャンネルは翻訳リクエストを送らない
-    if not settings.GetVisible(channelName) then return end
-
-    -- NPC名リストに登録されていれば完全にスキップ（翻訳もウィンドウ表示もしない）
-    if settings.IsNpc(name) then return end
+    -- Family チャットは翻訳せずそのまま表示
+    if channelName == "Family" then
+        local resolvedMsg = resolveItemLinks(message)
+        local label = makeLabel(channelName)
+        ui.AddMessage(label, name, colorKey, resolvedMsg, resolvedMsg)
+        return
+    end
 
     -- アイテムリンクを名前に置換してから書き出す
     local resolvedMsg = resolveItemLinks(message)
     local items = getLastResolvedItems()
 
+    -- 日本語が含まれるメッセージは翻訳せずそのまま表示（アイテムリンク解決後に判定）
+    if containsJapanese(resolvedMsg) then
+        local label = makeLabel(channelName)
+        ui.AddMessage(label, name, colorKey, resolvedMsg, resolvedMsg)
+        return
+    end
+
+    -- 設定で非表示に指定されているチャンネルは表示も翻訳もしない
+    if not settings.GetVisible(colorKey) then return end
+
     -- "x " で始まる短いメッセージ（レイド参加表明等）は翻訳せず直接表示
     -- "wts" / "wtb" で始まるメッセージも翻訳せず直接表示
     local lower = string.lower(resolvedMsg)
     if string.sub(lower, 1, 2) == "x "
-        or string.sub(lower, 1, 4) == "wts "
-        or string.sub(lower, 1, 4) == "wtb "
-        or lower == "wts"
-        or lower == "wtb" then
-        local label = "[" .. channelName .. "]"
+        or string.sub(lower, 1, 3) == "wts"
+        or string.sub(lower, 1, 3) == "wtb"
+        or string.sub(lower, 1, 4) == "~ x " then
+        local label = makeLabel(channelName)
         local itemColorMap = {}
         for _, item in ipairs(items) do
             itemColorMap[item.name] = item.color
         end
-        ui.AddMessageWithItems(label, name, channelName, resolvedMsg, resolvedMsg, itemColorMap)
+        ui.AddMessageWithItems(label, name, colorKey, resolvedMsg, resolvedMsg, itemColorMap)
         return
     end
+
+    -- exe が動作していない場合は翻訳リクエストを送らない
+    if engineMode ~= MODE_TRANSLATE then return end
 
     -- アイテム情報をキューに保存（翻訳結果受信時に取り出す）
     table.insert(pendingItems, items)
 
     local msg = string.format("[[JPCHAT||||%s||||%s||||%s]]", channelName, name, resolvedMsg)
     api.File:Write(INPUT_FILE, { chatMsg = msg })
+
+    -- 応答待ち開始
+    waitingResponse = true
+    noResponseTime = 0
 end
 
 -- ============================================================================
@@ -184,6 +264,10 @@ local function readTranslation()
     local translated = data.chatMsg
     if translated == lastOutput then return end
     lastOutput = translated
+
+    -- exe からの応答を受信 → 応答待ち解除
+    noResponseTime = 0
+    waitingResponse = false
 
     -- output形式: "Channel|||Sender|||翻訳テキスト|||原文"
     -- "|||" を固定セパレーターとして最大4分割する
@@ -204,7 +288,11 @@ local function readTranslation()
 
     if colKey == "" then colKey = "Say" end
 
-    local label = "[" .. colKey .. "]"
+    local label = makeLabel(colKey)
+
+    -- WhisperTo は色設定で Whisper を使う
+    local displayColorKey = colKey
+    if colKey == "WhisperTo" then displayColorKey = "Whisper" end
 
     -- colKey をそのまま渡して ui 側で色を引く。original はツールチップ用
     -- キューからアイテム色情報を取り出す
@@ -219,7 +307,7 @@ local function readTranslation()
     end
 
     -- アイテム色マップがあればオーバーレイ表示、なければ通常表示
-    ui.AddMessageWithItems(label, sender, colKey, text, original, itemColorMap)
+    ui.AddMessageWithItems(label, sender, displayColorKey, text, original, itemColorMap)
 
     -- 読んだら空にする
     api.File:Write(OUTPUT_FILE, { chatMsg = "" })
@@ -255,6 +343,34 @@ local function OnUpdate(dt)
     clockTimer = clockTimer + dt
     if clockTimer > POLL_INTERVAL then
         clockTimer = 0
+
+        -- ハートビート確認は5秒ごと、IDLEモード時のみ
+        if engineMode == MODE_IDLE then
+            hbCheckTimer = hbCheckTimer + POLL_INTERVAL
+            if hbCheckTimer >= HB_CHECK_INTERVAL then
+                hbCheckTimer = 0
+                local hbData = api.File:Read(HEARTBEAT_FILE)
+                if hbData and hbData.status == "ready" then
+                    engineMode = MODE_TRANSLATE
+                    noResponseTime = 0
+                    ui.AddMessage("[System]", "", "Zone", "JpChatTranslator.exe接続完了", "")
+                end
+            end
+        end
+
+        -- 翻訳モード時の応答タイムアウト監視（応答待ち中のみ）
+        if engineMode == MODE_TRANSLATE and waitingResponse then
+            noResponseTime = noResponseTime + POLL_INTERVAL
+            if noResponseTime > NO_RESPONSE_TIMEOUT then
+                engineMode = MODE_IDLE
+                pendingItems = {}
+                waitingResponse = false
+                noResponseTime = 0
+                hbCheckTimer = 0
+                ui.AddMessage("[System]", "", "Zone", "JpChatTranslator.exe接続待ち", "")
+            end
+        end
+
         readTranslation()
         readSendTranslation()
     end
@@ -283,6 +399,9 @@ local function OnLoad()
 
     -- UI ウィンドウを構築
     ui.Init()
+
+    -- 初回起動時は IDLE モード → 接続待ちを表示
+    ui.AddMessage("[System]", "", "Zone", "JpChatTranslator.exe接続待ち", "")
 
     -- 送信機能のコールバックをUIに注入
     ui.SetSendHandler(function(text)
