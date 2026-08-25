@@ -167,6 +167,9 @@ end
 -- ツールチップ（原文表示）
 -- ============================================================================
 
+-- 現在表示すべき行データのキャッシュ（リサイズ / メッセージ追加時に更新）
+local displayLines = {}
+
 local function GetMsgIndex(rowIdx)
     local total    = #displayLines
     local endIdx   = total - rowOffset
@@ -233,9 +236,6 @@ local function BuildDisplayLines()
     end
     return lines
 end
-
--- 現在表示すべき行データのキャッシュ（リサイズ / メッセージ追加時に更新）
-local displayLines = {}
 
 local function RefreshDisplayLines()
     displayLines = BuildDisplayLines()
