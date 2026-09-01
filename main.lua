@@ -309,6 +309,11 @@ local function readTranslation()
     -- アイテム色マップがあればオーバーレイ表示、なければ通常表示
     ui.AddMessageWithItems(label, sender, displayColorKey, text, original, itemColorMap)
 
+    -- RaidLeader は画面中央上部のオーバーレイにも表示（自動フェードアウト）
+    if colKey == "RaidLeader" and ui.ShowRaidLeaderOverlay then
+        ui.ShowRaidLeaderOverlay(sender .. ": " .. text)
+    end
+
     -- 読んだら空にする
     api.File:Write(OUTPUT_FILE, { chatMsg = "" })
 end
@@ -394,8 +399,15 @@ local function OnLoad()
     ui.SetSettings(settings)
     ui.SetSettingsOpener(function() settingsPage.Open() end)
 
-    -- 設定ページに設定モジュールと色更新・透過率コールバックを注入
-    settingsPage.Init(settings, function() ui.RefreshColors() end, function(a) ui.SetOpacity(a) end, function(s) ui.SetFontSize(s) end)
+    -- 設定ページに設定モジュールと各種コールバックを注入
+    settingsPage.Init(
+        settings,
+        function() ui.RefreshColors() end,
+        function(a) ui.SetOpacity(a) end,
+        function(s) ui.SetFontSize(s) end,
+        function(x, y) ui.SetRaidOverlayPos(x, y) end,
+        function() ui.PreviewRaidOverlay() end
+    )
 
     -- UI ウィンドウを構築
     ui.Init()

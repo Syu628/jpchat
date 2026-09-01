@@ -763,11 +763,96 @@ function M.Init()
     CreateBody()
     CreateFooter()
     CreateResizeHandle()
+
+    CreateRaidLeaderOverlay()
+end
+
+-- ============================================================================
+-- RaidLeader オーバーレイ（画面中央上部・自動フェードアウト）
+-- ============================================================================
+
+local raidOverlay      = nil   -- オーバーレイウィンドウ
+local raidOverlayHide  = 0     -- 非表示予定時刻（api.Time:GetUiMsec 基準）
+local RAID_SHOW_MS     = 3000  -- 表示継続時間（ミリ秒）
+local RAID_FADE_MS     = 1000  -- フェードアウト開始までの残り時間
+
+function CreateRaidLeaderOverlay()
+    if raidOverlay ~= nil then return end
+
+    raidOverlay = api.Interface:CreateEmptyWindow("jpchatRaidOverlay", "UIParent")
+    raidOverlay:SetExtent(600, 44)
+    -- 画面中央上部（TOP基準）。設定から位置を復元
+    local rx, ry = 0, 80
+    if settings and settings.GetRaidPos then
+        rx, ry = settings.GetRaidPos()
+    end
+    raidOverlay:AddAnchor("TOP", "UIParent", "TOP", rx, ry)
+
+    -- 半透明背景
+    local bg = raidOverlay:CreateNinePartDrawable(TEXTURE_PATH.HUD, "background")
+    bg:SetTextureInfo("bg_quest")
+    bg:SetColor(0, 0, 0, 0.6)
+    bg:AddAnchor("TOPLEFT", raidOverlay, "TOPLEFT", 0, 0)
+    bg:AddAnchor("BOTTOMRIGHT", raidOverlay, "BOTTOMRIGHT", 0, 0)
+
+    -- テキストラベル
+    local label = raidOverlay:CreateChildWidget("label", "raidLabel", 0, true)
+    label:AddAnchor("CENTER", raidOverlay, "CENTER", 0, 0)
+    label.style:SetFontSize(20)
+    label.style:SetColor(1.0, 0.40, 0.00, 1.0)  -- RaidLeader色（オレンジ赤）
+    label.style:SetAlign(ALIGN.CENTER)
+    raidOverlay.raidLabel = label
+
+    raidOverlay:Show(false)
+end
+
+-- RaidLeader の翻訳結果をオーバーレイに表示する
+-- 表示中に再度呼ばれた場合はカウントをリセットして表示を延長する
+function M.ShowRaidLeaderOverlay(text)
+    if raidOverlay == nil then return end
+
+    if raidOverlay.raidLabel then
+        raidOverlay.raidLabel:SetText(text or "")
+    end
+
+    if raidOverlay.SetAlpha then
+        raidOverlay:SetAlpha(1.0)
+    end
+    raidOverlay:Show(true)
+
+    -- 非表示予定時刻をリセット（再受信時は延長される）
+    raidOverlayHide = api.Time:GetUiMsec() + RAID_SHOW_MS
+end
+
+-- RaidLeaderオーバーレイの位置を更新する（設定変更時に呼ぶ）
+function M.SetRaidOverlayPos(x, y)
+    if raidOverlay == nil then return end
+    raidOverlay:RemoveAllAnchors()
+    raidOverlay:AddAnchor("TOP", "UIParent", "TOP", x, y)
+end
+
+-- RaidLeaderオーバーレイを一時的に表示する（プレビュー用）
+function M.PreviewRaidOverlay()
+    M.ShowRaidLeaderOverlay("[RaidLeader] Preview / \227\131\151\227\131\172\227\131\147\227\131\165\227\131\188")
 end
 
 -- リサイズ UPDATE を main.lua の OnUpdate から呼んでもらう
 function M.OnUpdate()
     OnUpdateResize()
+
+    -- RaidLeader オーバーレイのフェードアウト処理
+    if raidOverlay ~= nil and raidOverlay:IsVisible() and raidOverlayHide > 0 then
+        local timeLeft = raidOverlayHide - api.Time:GetUiMsec()
+        if timeLeft <= 0 then
+            raidOverlay:Show(false)
+            raidOverlayHide = 0
+        elseif timeLeft < RAID_FADE_MS then
+            -- 残り RAID_FADE_MS で徐々に透明化
+            if raidOverlay.SetAlpha then
+                raidOverlay:SetAlpha(timeLeft / RAID_FADE_MS)
+            end
+        end
+    end
 end
 
 -- colKey:     チャンネルキー文字列（"Say", "Party" など）
@@ -862,6 +947,12 @@ function M.Shutdown()
         bodyRows     = {}
         btnToggle    = nil
         bgDrawables  = {}
+    end
+    if raidOverlay then
+        raidOverlay:Show(false)
+        api.Interface:Free(raidOverlay)
+        raidOverlay = nil
+        raidOverlayHide = 0
     end
 end
 

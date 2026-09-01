@@ -23,6 +23,8 @@ local SAVE_PATH       = "jpchat/jpchat_settings.lua"
 local ADDON_ID        = "jpchat"
 local DEFAULT_OPACITY = 0.92   -- ウィンドウ背景の不透明度デフォルト値（0.1〜1.0）
 local DEFAULT_FONTSIZE = 13    -- デフォルトフォントサイズ（FONT_SIZE.MIDDLE = 13）
+local DEFAULT_RAID_X   = 0     -- RaidLeaderオーバーレイのXオフセット（TOP基準）
+local DEFAULT_RAID_Y   = 80    -- RaidLeaderオーバーレイのYオフセット（TOP基準）
 
 -- 実行時テーブル（デフォルトをコピーして使う）
 local colors   = {}
@@ -30,6 +32,8 @@ local opacity  = DEFAULT_OPACITY
 local fontSize = DEFAULT_FONTSIZE
 local visible  = {}  -- チャンネルキー → bool（true=表示、false=非表示）
 local winPos   = nil -- ウィンドウ位置・サイズ { x, y, w, h } （nil = デフォルト位置）
+local raidX    = DEFAULT_RAID_X  -- RaidLeaderオーバーレイXオフセット
+local raidY    = DEFAULT_RAID_Y  -- RaidLeaderオーバーレイYオフセット
 npcList = {
 --ルル
 ["Auctioneer"] = true,
@@ -57,7 +61,7 @@ end
 local M = {}
 
 function M.Save()
-    api.File:Write(SAVE_PATH, { colors = colors, opacity = opacity, visible = visible, winPos = winPos, fontSize = fontSize, npcList = npcList })
+    api.File:Write(SAVE_PATH, { colors = colors, opacity = opacity, visible = visible, winPos = winPos, fontSize = fontSize, npcList = npcList, raidX = raidX, raidY = raidY })
 end
 
 function M.Load()
@@ -102,6 +106,9 @@ function M.Load()
             end
         end
     end
+    -- RaidLeaderオーバーレイ位置
+    if type(data.raidX) == "number" then raidX = data.raidX end
+    if type(data.raidY) == "number" then raidY = data.raidY end
 end
 
 -- ============================================================================
@@ -172,6 +179,23 @@ end
 
 function M.SetWinPos(x, y, w, h)
     winPos = { x = x, y = y, w = w, h = h }
+end
+
+-- ============================================================================
+-- RaidLeaderオーバーレイ位置の取得 / 設定
+-- ============================================================================
+
+function M.GetRaidPos()
+    return raidX, raidY
+end
+
+function M.SetRaidPos(x, y)
+    raidX = tonumber(x) or DEFAULT_RAID_X
+    raidY = tonumber(y) or DEFAULT_RAID_Y
+end
+
+function M.GetDefaultRaidPos()
+    return DEFAULT_RAID_X, DEFAULT_RAID_Y
 end
 
 -- ============================================================================
