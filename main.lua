@@ -6,7 +6,7 @@ local settingsPage = require("jpchat/settings_page")
 local jpchat_addon = {
     name    = "jpchat",
     author  = "Syu",
-    version = "1.1.0",
+    version = "1.2.0",
     desc    = "Chat translation addon. Displays Japanese translations in a window.",
 }
 
@@ -43,7 +43,6 @@ local CHANNEL_LABEL = {
 -- 内部状態
 -- ============================================================================
 
-local cantReadWindow = nil
 local clockTimer     = 0
 local lastOutput     = ""
 local pendingItems   = {}  -- 翻訳待ちアイテム情報キュー
@@ -379,8 +378,8 @@ local function OnUpdate(dt)
         readTranslation()
         readSendTranslation()
     end
-    -- リサイズ処理（ドラッグ中のみ動作）
-    ui.OnUpdate()
+    -- リサイズ処理・オーバーレイのフェードは ui 側の OnUpdate ハンドラ内で
+    -- 実行される（UpdateInternal）。ここでは呼ばない。
 end
 
 -- ============================================================================
@@ -405,15 +404,16 @@ local function OnLoad()
         function() ui.RefreshColors() end,
         function(a) ui.SetOpacity(a) end,
         function(s) ui.SetFontSize(s) end,
-        function(x, y) ui.SetRaidOverlayPos(x, y) end,
-        function() ui.PreviewRaidOverlay() end
+        function() ui.StartRaidOverlayAdjust() end,   -- RaidLeader位置調整モード開始
+        function() ui.StopRaidOverlayAdjust() end,    -- RaidLeader位置調整モード終了
+        function()                                    -- RaidLeader位置を初期化
+            local dx, dy = settings.GetDefaultRaidPos()
+            settings.SetRaidPos(dx, dy)
+            settings.Save()
+            ui.RefreshRaidOverlayPos()
+        end,
+        function() return ui.GetMainWindow() end      -- 設定ウィンドウの親（メインウィンドウ）を供給
     )
-
-    -- UI ウィンドウを構築
-    ui.Init()
-
-    -- 初回起動時は IDLE モード → 接続待ちを表示
-    ui.AddMessage("[System]", "", "Zone", "JpChatTranslator.exe接続待ち", "")
 
     -- 送信機能のコールバックをUIに注入
     ui.SetSendHandler(function(text)
@@ -428,20 +428,17 @@ local function OnLoad()
         api.Log:Info("[jpchat] NPCとして登録: " .. name)
     end)
 
-    -- チャット受信キャンバスを作成
-    cantReadWindow = api.Interface:CreateEmptyWindow("jpchatCanvas")
+    -- チャット受信・毎フレーム更新は ui のメインウィンドウに集約する
+    -- （トップレベルウィンドウを増やさないため、ui.Init 内で子キャンバス／
+    --   メインウィンドウの OnUpdate に張られる）。ui.Init の前に登録すること。
+    ui.SetChatEventHandler(writeChatToFile)
+    ui.SetUpdateHandler(OnUpdate)
 
-    function cantReadWindow:OnEvent(event, ...)
-        if event == "CHAT_MESSAGE" then
-            if arg ~= nil then
-                writeChatToFile(unpack(arg))
-            end
-        end
-    end
-    cantReadWindow:SetHandler("OnEvent", cantReadWindow.OnEvent)
-    cantReadWindow:RegisterEvent("CHAT_MESSAGE")
+    -- UI ウィンドウを構築
+    ui.Init()
 
-    api.On("UPDATE", OnUpdate)
+    -- 初回起動時は IDLE モード → 接続待ちを表示
+    ui.AddMessage("[System]", "", "Zone", "JpChatTranslator.exe接続待ち", "")
 
     -- 通信ファイルを初期化
     api.File:Write(INPUT_FILE,       { chatMsg = "" })
@@ -453,13 +450,13 @@ local function OnLoad()
 end
 
 local function OnUnload()
-    api.On("UPDATE", function() return end)
-    if cantReadWindow then
-        cantReadWindow:ReleaseHandler("OnEvent")
-        api.Interface:Free(cantReadWindow)
-        cantReadWindow = nil
-    end
+    -- 設定ウィンドウは ui のメインウィンドウの子。先に参照を手放しておく
+    -- （実体は ui.Shutdown での親 Free で一緒に解放される）。
     settingsPage.Shutdown()
+
+    -- トップレベルはメインウィンドウ 1 枚のみ。ui.Shutdown が
+    -- 更新ドライバ（OnUpdate）とチャット受信キャンバスを止め、
+    -- メインウィンドウを 1 回 Free する（子はすべて親ごと解放される）。
     ui.Shutdown()
 end
 

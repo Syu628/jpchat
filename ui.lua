@@ -26,12 +26,12 @@ local win         = nil
 local bodyWidget  = nil
 local footer      = nil
 local resizeHandle = nil
+local chatCanvas  = nil          -- チャット受信用の子キャンバス（win の子）
 local bodyRows    = {}         -- { {lbl=label, overlay=label}, ... } 各行に2枚のラベル
 local BODY_ROWS   = 0
 local messages    = {}         -- { full, colKey, original, itemRanges } 
                                -- itemRanges: { {s=startByte, e=endByte, color={r,g,b,a}}, ... } or nil
 local rowOffset   = 0
-local bodyVisible = true
 
 -- 現在のウィンドウサイズ（リサイズ後に更新）
 local WIN_W = WIN_W_DEFAULT
@@ -426,28 +426,16 @@ end
 -- ウィンドウ構築
 -- ============================================================================
 
+-- UI 内部の毎フレーム更新処理（M.Init の OnUpdate ハンドラから呼ぶ）。
+-- 本体は raidOverlay 関連の宣言後（ファイル後方）で定義するため前方宣言する。
+local UpdateInternal
+
 local settingsPageOpen = nil
-local btnToggle        = nil
 local sendHandler      = nil  -- 送信コールバック（main.lua から注入）
 local sendEditWidget   = nil  -- 入力欄（リサイズ連動用）
 local npcRegisterHandler = nil -- NPC登録コールバック（main.lua から注入）
-
-local function SetBodyVisible(visible)
-    bodyVisible = visible
-    if bodyWidget then bodyWidget:Show(visible) end
-    if footer     then footer:Show(visible)     end
-    if resizeHandle then resizeHandle:Show(visible) end
-    if win then
-        if visible then
-            win:SetExtent(WIN_W, WIN_H)
-        else
-            win:SetExtent(WIN_W, HEADER_H)
-        end
-    end
-    if btnToggle then
-        btnToggle:SetText(visible and "隠す" or "表示")
-    end
-end
+local chatEventHandler = nil  -- CHAT_MESSAGE 受信コールバック（main.lua から注入）
+local updateHandler    = nil  -- 毎フレーム更新コールバック（main.lua から注入）
 
 local function CreateHeader()
     local header = win:CreateChildWidget("emptywidget", "jpchatHeader", 0, true)
@@ -465,29 +453,13 @@ local function CreateHeader()
         title.style:SetColor(0.8, 0.8, 0.9, 1)
     end
 
-    -- 閉じるボタン（右端）
-    local btnClose = header:CreateChildWidget("button", "jpchatClose", 0, true)
-    btnClose:SetExtent(26, 20)
-    btnClose:AddAnchor("RIGHT", header, -4, 0)
-    btnClose:SetText("X")
-    btnClose:SetHandler("OnClick", function() win:Show(false) end)
-
-    -- 設定ボタン
+    -- 設定ボタン（右端）
     local btnSettings = header:CreateChildWidget("button", "jpchatSettings", 0, true)
     btnSettings:SetExtent(46, 20)
-    btnSettings:AddAnchor("RIGHT", header, -34, 0)
+    btnSettings:AddAnchor("RIGHT", header, -4, 0)
     btnSettings:SetText("設定")
     btnSettings:SetHandler("OnClick", function()
         if settingsPageOpen then settingsPageOpen() end
-    end)
-
-    -- Hide/Show トグルボタン
-    btnToggle = header:CreateChildWidget("button", "jpchatToggle", 0, true)
-    btnToggle:SetExtent(44, 20)
-    btnToggle:AddAnchor("RIGHT", header, -84, 0)
-    btnToggle:SetText("隠す")
-    btnToggle:SetHandler("OnClick", function()
-        SetBodyVisible(not bodyVisible)
     end)
 
     -- Shift+ドラッグで移動
@@ -689,6 +661,12 @@ function M.SetSettings(s)
     settings = s
 end
 
+-- メインウィンドウ（トップレベル）を返す。設定ウィンドウなどの子ウィジェットの
+-- 親として使う。ui.Init() 実行前は nil。
+function M.GetMainWindow()
+    return win
+end
+
 function M.SetSettingsOpener(fn)
     settingsPageOpen = fn
 end
@@ -699,6 +677,18 @@ end
 
 function M.SetNpcRegisterHandler(fn)
     npcRegisterHandler = fn
+end
+
+-- CHAT_MESSAGE 受信時に呼ばれるコールバックを登録する
+-- fn は writeChatToFile 相当（channel, unit, isHostile, name, message を受け取る）
+function M.SetChatEventHandler(fn)
+    chatEventHandler = fn
+end
+
+-- 毎フレーム呼ばれる更新コールバックを登録する（main.lua の OnUpdate 相当）
+-- fn は経過時間(dt) を受け取る
+function M.SetUpdateHandler(fn)
+    updateHandler = fn
 end
 
 function M.Init()
@@ -765,6 +755,32 @@ function M.Init()
     CreateResizeHandle()
 
     CreateRaidLeaderOverlay()
+
+    -- ------------------------------------------------------------------
+    -- チャット受信キャンバス（メインウィンドウの子ウィジェット）
+    -- リファレンス指針: トップレベルウィンドウを増やさないため、イベント受信は
+    -- 専用の子 emptywidget に RegisterEvent を張る（子はカウントされない）。
+    -- ------------------------------------------------------------------
+    chatCanvas = win:CreateChildWidget("emptywidget", "jpchatCanvas", 0, true)
+    function chatCanvas:OnEvent(event, ...)
+        if event == "CHAT_MESSAGE" and arg ~= nil and chatEventHandler then
+            chatEventHandler(unpack(arg))
+        end
+    end
+    chatCanvas:SetHandler("OnEvent", chatCanvas.OnEvent)
+    chatCanvas:RegisterEvent("CHAT_MESSAGE")
+
+    -- ------------------------------------------------------------------
+    -- 更新ドライバ（メインウィンドウ自身の OnUpdate を流用）
+    -- api.On("UPDATE") ではなくメインウィンドウの OnUpdate に集約することで、
+    -- トップレベルウィンドウを増やさずに毎フレーム処理を回す。
+    -- ------------------------------------------------------------------
+    win:SetHandler("OnUpdate", function(self, dt)
+        -- UI 内部の更新（リサイズ追従・オーバーレイのフェードアウト）
+        UpdateInternal()
+        -- main.lua から注入された更新処理（ポーリング等）
+        if updateHandler then updateHandler(dt) end
+    end)
 end
 
 -- ============================================================================
@@ -773,27 +789,82 @@ end
 
 local raidOverlay      = nil   -- オーバーレイウィンドウ
 local raidOverlayHide  = 0     -- 非表示予定時刻（api.Time:GetUiMsec 基準）
-local RAID_SHOW_MS     = 3000  -- 表示継続時間（ミリ秒）
+local raidAdjustMode   = false -- 位置調整モード中か（true の間は自動非表示しない）
+-- オーバーレイのドラッグ移動（StartMoving 非対応環境向けの手動追従フォールバック用）
+local raidDragging     = false -- 手動追従でドラッグ中か
+local raidDragSX       = 0     -- ドラッグ開始時のマウス X
+local raidDragSY       = 0     -- ドラッグ開始時のマウス Y
+local raidDragBaseX    = 0     -- ドラッグ開始時の TOP 基準 X
+local raidDragBaseY    = 0     -- ドラッグ開始時の TOP 基準 Y
+local RAID_OVERLAY_W   = 600   -- オーバーレイ幅
+local RAID_OVERLAY_H   = 44    -- オーバーレイ高さ
+local RAID_SHOW_MS     = 3500  -- 表示継続時間（ミリ秒）
 local RAID_FADE_MS     = 1000  -- フェードアウト開始までの残り時間
+
+-- 保存位置（無ければ既定）を TOP 基準で貼り直す（リファレンス ApplyOverlayPos 相当）
+local function ApplyRaidOverlayPos()
+    if raidOverlay == nil then return end
+    local x, y = 0, 80
+    if settings and settings.GetRaidPos then
+        x, y = settings.GetRaidPos()
+    end
+    raidOverlay:RemoveAllAnchors()
+    raidOverlay:AddAnchor("TOP", "UIParent", "TOP", x, y)
+end
+
+-- ドラッグ終了時に現在位置を TOP 基準オフセットへ換算して保存する
+-- （リファレンス「④ 位置の保存（TOP 基準への換算）」に準拠）
+local function SaveRaidOverlayPos()
+    if raidOverlay == nil then return end
+    if not settings or not settings.SetRaidPos then return end
+
+    local lx, ly
+    pcall(function() lx, ly = raidOverlay:GetOffset() end)
+    if lx == nil or ly == nil then return end
+
+    -- GetOffset は UIスケール適用後の論理座標。AddAnchor に渡す device 座標へ戻す
+    local scale = 1
+    pcall(function() scale = api.Interface:GetUIScale() end)
+    if scale and scale > 0 then
+        lx = lx * scale
+        ly = ly * scale
+    end
+
+    -- TOP 基準 X = 左端 - (画面中央 - 幅/2)
+    local screenW = 1920
+    pcall(function() screenW = api.Interface:GetScreenWidth() end)
+    local topOffsetX = lx - (screenW / 2 - RAID_OVERLAY_W / 2)
+
+    settings.SetRaidPos(topOffsetX, ly)
+    settings.Save()
+    ApplyRaidOverlayPos()   -- 保存値でアンカーを貼り直す
+end
 
 function CreateRaidLeaderOverlay()
     if raidOverlay ~= nil then return end
+    if win == nil then return end
 
-    raidOverlay = api.Interface:CreateEmptyWindow("jpchatRaidOverlay", "UIParent")
-    raidOverlay:SetExtent(600, 44)
+    -- リファレンス指針: トップレベルウィンドウ（CreateEmptyWindow）は増やさない。
+    -- オーバーレイはメインウィンドウの子ウィジェットとして作る（Rendered Windows にカウントされない）。
+    -- 画面中央上部への配置は子ウィジェットでも UIParent 基準アンカーで可能。
+    raidOverlay = win:CreateChildWidget("emptywidget", "jpchatRaidOverlay", 0, true)
+    raidOverlay:SetExtent(RAID_OVERLAY_W, RAID_OVERLAY_H)
     -- 画面中央上部（TOP基準）。設定から位置を復元
-    local rx, ry = 0, 80
-    if settings and settings.GetRaidPos then
-        rx, ry = settings.GetRaidPos()
-    end
-    raidOverlay:AddAnchor("TOP", "UIParent", "TOP", rx, ry)
+    ApplyRaidOverlayPos()
 
-    -- 半透明背景
-    local bg = raidOverlay:CreateNinePartDrawable(TEXTURE_PATH.HUD, "background")
-    bg:SetTextureInfo("bg_quest")
-    bg:SetColor(0, 0, 0, 0.6)
-    bg:AddAnchor("TOPLEFT", raidOverlay, "TOPLEFT", 0, 0)
-    bg:AddAnchor("BOTTOMRIGHT", raidOverlay, "BOTTOMRIGHT", 0, 0)
+    -- 半透明背景（告知風テクスチャ。使えない環境では単色にフォールバック）
+    local ok = pcall(function()
+        local bg = raidOverlay:CreateNinePartDrawable(TEXTURE_PATH.HUD, "background")
+        bg:SetTextureInfo("bg_quest")
+        bg:SetColor(0, 0, 0, 0.6)
+        bg:AddAnchor("TOPLEFT", raidOverlay, "TOPLEFT", 0, 0)
+        bg:AddAnchor("BOTTOMRIGHT", raidOverlay, "BOTTOMRIGHT", 0, 0)
+    end)
+    if not ok then
+        local bg = raidOverlay:CreateColorDrawable(0, 0, 0, 0.6, "background")
+        bg:AddAnchor("TOPLEFT", raidOverlay, 0, 0)
+        bg:AddAnchor("BOTTOMRIGHT", raidOverlay, 0, 0)
+    end
 
     -- テキストラベル
     local label = raidOverlay:CreateChildWidget("label", "raidLabel", 0, true)
@@ -801,7 +872,45 @@ function CreateRaidLeaderOverlay()
     label.style:SetFontSize(20)
     label.style:SetColor(1.0, 0.40, 0.00, 1.0)  -- RaidLeader色（オレンジ赤）
     label.style:SetAlign(ALIGN.CENTER)
+    -- ラベルのクリックを透過させ、背後のオーバーレイのドラッグを妨げない
+    pcall(function() label:Clickable(false) end)
     raidOverlay.raidLabel = label
+
+    -- Shift+ドラッグで位置調整（リファレンス標準方式）。
+    -- ネイティブの StartMoving を試し、未対応環境では GetMousePos による
+    -- 手動追従にフォールバックする（リサイズハンドルと同じ考え方）。
+    raidOverlay:EnableDrag(true)
+    raidOverlay:SetHandler("OnDragStart", function()
+        if not api.Input:IsShiftKeyDown() then return end
+        local ok = pcall(function() raidOverlay:StartMoving() end)
+        if ok then
+            raidDragging = false   -- ネイティブ移動: OnDragStop で GetOffset から保存
+        else
+            -- 手動追従: 現在の TOP 基準オフセットを基準に、マウス移動量を加算する
+            raidDragging = true
+            raidDragSX, raidDragSY = api.Input:GetMousePos()
+            if settings and settings.GetRaidPos then
+                raidDragBaseX, raidDragBaseY = settings.GetRaidPos()
+            else
+                raidDragBaseX, raidDragBaseY = 0, 80
+            end
+        end
+    end)
+    raidOverlay:SetHandler("OnDragStop", function()
+        if raidDragging then
+            raidDragging = false
+            -- 手動追従で更新済みの TOP 基準値をそのまま保存する
+            if settings and settings.SetRaidPos then
+                local x, y = settings.GetRaidPos()
+                settings.SetRaidPos(x, y)
+                settings.Save()
+            end
+            ApplyRaidOverlayPos()
+        else
+            pcall(function() raidOverlay:StopMovingOrSizing() end)
+            SaveRaidOverlayPos()
+        end
+    end)
 
     raidOverlay:Show(false)
 end
@@ -815,30 +924,59 @@ function M.ShowRaidLeaderOverlay(text)
         raidOverlay.raidLabel:SetText(text or "")
     end
 
-    if raidOverlay.SetAlpha then
-        raidOverlay:SetAlpha(1.0)
-    end
+    pcall(function() raidOverlay:SetAlpha(1.0) end)
     raidOverlay:Show(true)
 
     -- 非表示予定時刻をリセット（再受信時は延長される）
     raidOverlayHide = api.Time:GetUiMsec() + RAID_SHOW_MS
 end
 
--- RaidLeaderオーバーレイの位置を更新する（設定変更時に呼ぶ）
-function M.SetRaidOverlayPos(x, y)
+-- 保存済みの位置設定でオーバーレイのアンカーを貼り直す（初期化ボタン等から呼ぶ）
+function M.RefreshRaidOverlayPos()
+    ApplyRaidOverlayPos()
+end
+
+-- 位置調整モードを開始する。
+-- サンプル表示のまま自動で消えないようにし、Shift+ドラッグで位置を合わせられる。
+function M.StartRaidOverlayAdjust()
     if raidOverlay == nil then return end
-    raidOverlay:RemoveAllAnchors()
-    raidOverlay:AddAnchor("TOP", "UIParent", "TOP", x, y)
+    raidAdjustMode = true
+    raidOverlayHide = 0   -- 自動非表示を止める
+    if raidOverlay.raidLabel then
+        raidOverlay.raidLabel:SetText("[RaidLeader] 位置調整中 / Shift+ドラッグで移動")
+    end
+    pcall(function() raidOverlay:SetAlpha(1.0) end)
+    ApplyRaidOverlayPos()
+    raidOverlay:Show(true)
 end
 
--- RaidLeaderオーバーレイを一時的に表示する（プレビュー用）
-function M.PreviewRaidOverlay()
-    M.ShowRaidLeaderOverlay("[RaidLeader] Preview / \227\131\151\227\131\172\227\131\147\227\131\165\227\131\188")
+-- 位置調整モードを終了する（オーバーレイを隠す）
+function M.StopRaidOverlayAdjust()
+    raidAdjustMode = false
+    if raidOverlay == nil then return end
+    raidOverlay:Show(false)
+    raidOverlayHide = 0
 end
 
--- リサイズ UPDATE を main.lua の OnUpdate から呼んでもらう
-function M.OnUpdate()
+-- UI 内部の毎フレーム更新（前方宣言した UpdateInternal に本体を代入）。
+-- メインウィンドウ（win）の OnUpdate ハンドラから毎フレーム呼ばれる。
+UpdateInternal = function()
     OnUpdateResize()
+
+    -- オーバーレイの手動追従ドラッグ（StartMoving 非対応環境のフォールバック）
+    if raidDragging and raidOverlay ~= nil then
+        local mx, my = api.Input:GetMousePos()
+        local nx = raidDragBaseX + (mx - raidDragSX)
+        local ny = raidDragBaseY + (my - raidDragSY)
+        if settings and settings.SetRaidPos then
+            settings.SetRaidPos(nx, ny)   -- 保存は OnDragStop でまとめて行う
+        end
+        raidOverlay:RemoveAllAnchors()
+        raidOverlay:AddAnchor("TOP", "UIParent", "TOP", nx, ny)
+    end
+
+    -- 位置調整モード中は自動非表示・フェードを行わない（サンプル表示のまま固定）
+    if raidAdjustMode then return end
 
     -- RaidLeader オーバーレイのフェードアウト処理
     if raidOverlay ~= nil and raidOverlay:IsVisible() and raidOverlayHide > 0 then
@@ -848,9 +986,7 @@ function M.OnUpdate()
             raidOverlayHide = 0
         elseif timeLeft < RAID_FADE_MS then
             -- 残り RAID_FADE_MS で徐々に透明化
-            if raidOverlay.SetAlpha then
-                raidOverlay:SetAlpha(timeLeft / RAID_FADE_MS)
-            end
+            pcall(function() raidOverlay:SetAlpha(timeLeft / RAID_FADE_MS) end)
         end
     end
 end
@@ -937,7 +1073,17 @@ end
 
 function M.Shutdown()
     HideOriginalTooltip()
+
+    -- 更新ドライバ・イベント受信を止める（トップレベルは win 1枚のみ）
+    if chatCanvas then
+        pcall(function() chatCanvas:ReleaseHandler("OnEvent") end)
+        chatCanvas = nil
+    end
+
+    -- 子ウィジェット（chatCanvas / raidOverlay / 設定ページ 等）は win を Free すれば
+    -- 親ごと解放される。トップレベルは win 1枚だけなので個別 Free は不要。
     if win then
+        pcall(function() win:SetHandler("OnUpdate", function() return end) end)
         win:Show(false)
         api.Interface:Free(win)
         win          = nil
@@ -945,15 +1091,12 @@ function M.Shutdown()
         footer       = nil
         resizeHandle = nil
         bodyRows     = {}
-        btnToggle    = nil
         bgDrawables  = {}
     end
-    if raidOverlay then
-        raidOverlay:Show(false)
-        api.Interface:Free(raidOverlay)
-        raidOverlay = nil
-        raidOverlayHide = 0
-    end
+
+    -- 参照だけ手放す（実体は win の子として既に解放済み）
+    raidOverlay     = nil
+    raidOverlayHide = 0
 end
 
 return M

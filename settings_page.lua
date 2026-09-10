@@ -25,8 +25,61 @@ local settings         = nil
 local onChanged        = nil  -- 色変更時コールバック（ui.RefreshColors）
 local onOpacityChanged = nil  -- 透過率変更時コールバック（ui.SetOpacity）
 local onFontSizeChanged = nil -- フォントサイズ変更時コールバック（ui.SetFontSize）
-local onRaidPosChanged = nil  -- RaidLeader位置変更時コールバック（ui.SetRaidOverlayPos）
-local onRaidPreview    = nil  -- RaidLeaderプレビュー時コールバック（ui.PreviewRaidOverlay）
+local onRaidAdjustStart = nil -- RaidLeader位置調整モード開始（ui.StartRaidOverlayAdjust）
+local onRaidAdjustStop  = nil -- RaidLeader位置調整モード終了（ui.StopRaidOverlayAdjust）
+local onRaidReset       = nil -- RaidLeader位置を初期化（設定リセット＋ui.RefreshRaidOverlayPos）
+local getParent         = nil -- 親ウィジェット（メインウィンドウ）供給コールバック
+local raidAdjusting     = false -- 位置調整モード中フラグ（トグルボタンの表示切替用）
+local palettePopup      = nil -- カラーパレットのポップアップ（win の子。初回のみ生成し使い回す）
+local paletteTargetKey  = nil -- パレットで選んだ色を反映する対象チャンネルキー
+
+-- 共通「適用」ボタンから呼ぶ、透過率・フォントサイズの適用処理。
+-- M.Open 内で本体を代入する。入力が不正なら false を返しスキップ（Save はしない）。
+local applyOpacity      = nil
+local applyFontSize     = nil
+
+-- ============================================================================
+-- カラーパレット（ゲーム内パレットに準拠。16列 × 6行 = 96色）
+-- ============================================================================
+-- 画像の各セル中央付近の色を近似で拾った 16進コード（RRGGBB）。
+-- 行構成: 1=淡色, 2=鮮やか, 3=やや暗い, 4=暗い, 5=暗色+灰, 6=最暗色+白黒。
+local PALETTE_COLS = 16
+local PALETTE_ROWS = 6
+-- 実機のカラーパレットをマウスオーバーで実測した値（左上から右へ index 1..96）。
+local PALETTE_HEX  = {
+    -- 1行目
+    "F7987B","FAAE82","FEC68A","FFF89A","C5E09C","A3D49D","83CB9D","7CCDC9",
+    "6FD0F7","7FA8D9","8594CB","8983BF","A288BF","BD8DC0","F59BC3","F6999E",
+    -- 2行目
+    "F36D4F","F78F56","FCB05D","FFF568","ACD473","7DC677","3CB9FF","1BBCB5",
+    "01C0F4","448DCB","5675BA","615DA9","8660A9","A864A9","F16FAA","F36E7D",
+    -- 3行目
+    "FF0B15","FF6116","FF9516","FFF201","96FF07","01EF22","01A751","01AA9D",
+    "01AEF0","0173BD","5655A7","0105C1","6D01BE","BA01B4","ED018C","FF0355",
+    -- 4行目
+    "9E0B10","A1420E","A4630A","ACA101","5A8628","1B7B31","017337","01746C",
+    "0177A4","014C81","013572","1C1565","450F63","640561","9F015E","9E013A",
+    -- 5行目
+    "7A0101","7C2F01","7E4A01","837B01","416719","015F21","015927","015A53",
+    "015C80","013764","012258","0E014D","33014C","4C014A","7C0147","7A0127",
+    -- 6行目
+    "C8B39A","998776","746358","544842","37302E","C69D6E","A77D53","8D633A",
+    "764D25","613A14","FFFFFF","C3C3C3","969696","474747","262626","010101",
+}
+
+-- 16進(RRGGBB)を {r, g, b}(0.0-1.0) に変換する
+local function HexToRgb(hex)
+    local r = tonumber(hex:sub(1, 2), 16) or 0
+    local g = tonumber(hex:sub(3, 4), 16) or 0
+    local b = tonumber(hex:sub(5, 6), 16) or 0
+    return { r / 255, g / 255, b / 255 }
+end
+
+-- 正規化済みパレット（{r, g, b} の配列。読み込み時に1回だけ生成）
+local PALETTE = {}
+for i, hex in ipairs(PALETTE_HEX) do
+    PALETTE[i] = HexToRgb(hex)
+end
 
 local M = {}
 
@@ -60,6 +113,85 @@ local function UpdateCheckBtn(btn, key)
     else
         btn:SetText("[ ]")
     end
+end
+
+-- ============================================================================
+-- カラーパレット ポップアップ
+-- ============================================================================
+
+local PAL_CELL   = 22   -- 1色セルの1辺(px)
+local PAL_GAP    = 1    -- セル間の隙間(px)
+local PAL_MARGIN = 8    -- パレット内側の余白(px)
+local PAL_HEADER = 22   -- ヘッダー(閉じるボタン)の高さ(px)
+
+-- パレットを閉じる
+local function ClosePalette()
+    if palettePopup then palettePopup:Show(false) end
+    paletteTargetKey = nil
+end
+
+-- パレットのポップアップを初回のみ生成する（win の子ウィジェット）。
+-- トップレベルウィンドウを増やさないため、設定ウィンドウの子として作る。
+local function EnsurePalettePopup()
+    if palettePopup ~= nil then return end
+    if win == nil then return end
+
+    local gridW = PALETTE_COLS * PAL_CELL + (PALETTE_COLS - 1) * PAL_GAP
+    local gridH = PALETTE_ROWS * PAL_CELL + (PALETTE_ROWS - 1) * PAL_GAP
+    local popW  = gridW + PAL_MARGIN * 2
+    local popH  = gridH + PAL_MARGIN * 2 + PAL_HEADER
+
+    palettePopup = win:CreateChildWidget("emptywidget", "jpchatSP_palette", 0, true)
+    palettePopup:SetExtent(popW, popH)
+    palettePopup:AddAnchor("CENTER", win, "CENTER", 0, 0)
+
+    -- 背景（不透明寄り。モーダル風）
+    local bg = palettePopup:CreateColorDrawable(0.06, 0.06, 0.10, 0.98, "background")
+    bg:AddAnchor("TOPLEFT",     palettePopup, 0, 0)
+    bg:AddAnchor("BOTTOMRIGHT", palettePopup, 0, 0)
+
+    -- 閉じるボタン（右上）
+    local btnClose = palettePopup:CreateChildWidget("button", "jpchatSP_palClose", 0, true)
+    btnClose:SetExtent(20, 18)
+    btnClose:AddAnchor("TOPRIGHT", palettePopup, -4, -2)
+    btnClose:SetText("X")
+    btnClose:SetHandler("OnClick", function() ClosePalette() end)
+
+    -- 色セル（16 x 6）。クリックで対象行の RGB 入力欄へ反映して閉じる
+    for idx = 1, #PALETTE do
+        local ci  = idx                       -- ループ変数をローカルにキャプチャ
+        local col = PALETTE[ci]
+        local row = math.floor((idx - 1) / PALETTE_COLS)
+        local coln = (idx - 1) % PALETTE_COLS
+        local cx = PAL_MARGIN + coln * (PAL_CELL + PAL_GAP)
+        local cy = PAL_HEADER + PAL_MARGIN + row * (PAL_CELL + PAL_GAP)
+
+        local cell = palettePopup:CreateChildWidget("button", "jpchatSP_pal_" .. ci, 0, true)
+        cell:SetExtent(PAL_CELL, PAL_CELL)
+        cell:AddAnchor("TOPLEFT", palettePopup, cx, cy)
+        cell:SetText("")
+        local cellBg = cell:CreateColorDrawable(col[1], col[2], col[3], 1, "background")
+        cellBg:AddAnchor("TOPLEFT",     cell, 0, 0)
+        cellBg:AddAnchor("BOTTOMRIGHT", cell, 0, 0)
+
+        cell:SetHandler("OnClick", function()
+            local key = paletteTargetKey
+            if key and sRows[key] and sRows[key].setColor then
+                sRows[key].setColor(col[1], col[2], col[3])
+            end
+            ClosePalette()
+        end)
+    end
+
+    palettePopup:Show(false)   -- 生成直後は隠しておく
+end
+
+-- 指定行(key)を対象にパレットを開く
+local function OpenPaletteFor(key)
+    EnsurePalettePopup()
+    if palettePopup == nil then return end
+    paletteTargetKey = key
+    palettePopup:Show(true)
 end
 
 -- ============================================================================
@@ -105,39 +237,39 @@ local function BuildRow(key, yOffset)
     local eB = MakeColorEdit("jpchatSP_b_" .. key, win, col[3])
     eB:AddAnchor("TOPLEFT", win, COL_B, yOffset + 3)
 
-    -- ---- プレビュー（色付き矩形）----
-    local preview = win:CreateChildWidget("label", "jpchatSP_prev_" .. key, 0, true)
+    -- ---- プレビュー（色付き矩形。クリックでカラーパレットを開く）----
+    -- クリックを確実に拾うため button で作り、色見本を全面に敷く
+    local preview = win:CreateChildWidget("button", "jpchatSP_prev_" .. key, 0, true)
     preview:SetExtent(30, ROW_H - 4)
     preview:AddAnchor("TOPLEFT", win, COL_PREVIEW, yOffset + 2)
-    preview:SetText("  ")
+    preview:SetText("")
     local prevBg = preview:CreateColorDrawable(col[1], col[2], col[3], 1, "background")
     prevBg:AddAnchor("TOPLEFT",     preview, 0, 0)
     prevBg:AddAnchor("BOTTOMRIGHT", preview, 0, 0)
+    preview:SetHandler("OnClick", function()
+        OpenPaletteFor(key)
+    end)
 
-    -- ---- Apply ボタン ----
-    local btnApply = win:CreateChildWidget("button", "jpchatSP_apply_" .. key, 0, true)
-    btnApply:SetExtent(50, ROW_H - 2)
-    btnApply:AddAnchor("TOPLEFT", win, COL_APPLY, yOffset + 1)
-    btnApply:SetText("適用")
-    btnApply:SetHandler("OnClick", function()
+    -- ---- 色の適用処理（共通「適用」ボタンから呼ばれる）----
+    -- 入力が不正な場合は何もせず false を返す（スキップ）。Save は呼ばない
+    -- （共通「適用」側で最後にまとめて1回だけ保存する）。
+    local function applyColor()
         local r = ParseFloat(eR:GetText())
         local g = ParseFloat(eG:GetText())
         local b = ParseFloat(eB:GetText())
         if r == nil or g == nil or b == nil then
-            api.Log:Err("[jpchat] 色の値は 0.00〜1.00 で入力してください")
-            return
+            api.Log:Err("[jpchat] 色の値は 0.00〜1.00 で入力してください: " .. key)
+            return false
         end
         settings.SetColor(key, r, g, b, 1)
-        settings.Save()
         -- ラベル色とプレビューを更新（visible の alpha を維持）
         local alpha = settings.GetVisible(key) and 1.0 or 0.35
         if lbl.style then lbl.style:SetColor(r, g, b, alpha) end
         prevBg:SetColor(r, g, b, 1)
-        -- メインウィンドウの色を再描画
-        if onChanged then onChanged() end
         -- col を最新値に同期（チェックボタンの OnClick が参照するため）
         col = settings.GetColor(key)
-    end)
+        return true
+    end
 
     -- ---- Reset ボタン ----
     local btnReset = win:CreateChildWidget("button", "jpchatSP_reset_" .. key, 0, true)
@@ -158,33 +290,68 @@ local function BuildRow(key, yOffset)
         col = settings.GetColor(key)
     end)
 
-    sRows[key] = { lbl = lbl, chk = chk, eR = eR, eG = eG, eB = eB, prevBg = prevBg }
+    -- ---- パレットで選んだ色を入力欄とプレビューへ反映する（保存は共通「適用」で）----
+    local function setColor(r, g, b)
+        eR:SetText(string.format("%.2f", r))
+        eG:SetText(string.format("%.2f", g))
+        eB:SetText(string.format("%.2f", b))
+        prevBg:SetColor(r, g, b, 1)
+    end
+
+    sRows[key] = {
+        lbl = lbl, chk = chk, eR = eR, eG = eG, eB = eB, prevBg = prevBg,
+        apply = applyColor, setColor = setColor,
+    }
 end
 
 -- ============================================================================
 -- 公開 API
 -- ============================================================================
 
-function M.Init(settingsModule, refreshCallback, opacityCallback, fontSizeCallback, raidPosCallback, raidPreviewCallback)
-    settings           = settingsModule
-    onChanged          = refreshCallback
-    onOpacityChanged   = opacityCallback
-    onFontSizeChanged  = fontSizeCallback
-    onRaidPosChanged   = raidPosCallback
-    onRaidPreview      = raidPreviewCallback
+function M.Init(settingsModule, refreshCallback, opacityCallback, fontSizeCallback,
+                raidAdjustStartCallback, raidAdjustStopCallback, raidResetCallback, parentProvider)
+    settings            = settingsModule
+    onChanged           = refreshCallback
+    onOpacityChanged    = opacityCallback
+    onFontSizeChanged   = fontSizeCallback
+    onRaidAdjustStart   = raidAdjustStartCallback
+    onRaidAdjustStop    = raidAdjustStopCallback
+    onRaidReset         = raidResetCallback
+    getParent           = parentProvider
+end
+
+-- 設定ウィンドウを閉じる/破棄する前のクリーンアップ。
+-- 位置調整モードを終了し、開いているカラーパレットも閉じる。
+local function StopAdjustIfNeeded()
+    if raidAdjusting then
+        raidAdjusting = false
+        if onRaidAdjustStop then onRaidAdjustStop() end
+    end
+    ClosePalette()
 end
 
 function M.Open()
     if win then
-        win:Show(not win:IsVisible())
+        local willShow = not win:IsVisible()
+        win:Show(willShow)
+        if not willShow then StopAdjustIfNeeded() end   -- 閉じるときは調整モードも止める
         return
     end
 
     local keys   = settings.GetAllKeys()
-    -- チャンネル行 + 透過率行 + フォントサイズ行 + RaidLeader位置行 の合計高さ
-    local totalH = PADDING + #keys * (ROW_H + 4) + (ROW_H + 8) * 3 + PADDING + 30
+    -- チャンネル行 + 透過率行 + フォントサイズ行 + RaidLeader位置行 + 共通適用ボタン行 の合計高さ
+    local totalH = PADDING + #keys * (ROW_H + 4) + (ROW_H + 8) * 4 + PADDING + 30
 
-    win = api.Interface:CreateEmptyWindow("jpchatSettingsWin")
+    -- リファレンス指針: トップレベルウィンドウ（CreateEmptyWindow）を増やさない。
+    -- 設定ウィンドウはメインウィンドウの子ウィジェットとして生成し、以後は
+    -- Show(true/false) で使い回す（子は Rendered Windows にカウントされない）。
+    local parent = getParent and getParent() or nil
+    if parent == nil then
+        api.Log:Err("[jpchat] 設定ウィンドウの親が取得できませんでした")
+        return
+    end
+
+    win = parent:CreateChildWidget("emptywidget", "jpchatSettingsWin", 0, true)
     win:SetExtent(WIN_W, totalH)
     win:AddAnchor("CENTER", "UIParent", "CENTER", 0, 0)
     win:Show(true)
@@ -228,15 +395,20 @@ function M.Open()
     btnClose:SetExtent(26, 20)
     btnClose:AddAnchor("TOPRIGHT", win, -4, 4)
     btnClose:SetText("X")
-    btnClose:SetHandler("OnClick", function() win:Show(false) end)
+    btnClose:SetHandler("OnClick", function()
+        win:Show(false)
+        StopAdjustIfNeeded()   -- 閉じるときは調整モードも止める
+    end)
 
-    -- Shift+ドラッグで移動
+    -- Shift+ドラッグで移動（子ウィジェットでは効かない環境があるため pcall で保護）
     titleLbl:EnableDrag(true)
     titleLbl:SetHandler("OnDragStart", function()
-        if api.Input:IsShiftKeyDown() then win:StartMoving() end
+        if api.Input:IsShiftKeyDown() then
+            pcall(function() win:StartMoving() end)
+        end
     end)
     titleLbl:SetHandler("OnDragStop", function()
-        win:StopMovingOrSizing()
+        pcall(function() win:StopMovingOrSizing() end)
     end)
 
     -- 各チャンネル行
@@ -281,22 +453,19 @@ function M.Open()
         opHint.style:SetColor(0.5, 0.5, 0.5, 1)
     end
 
-    -- Apply ボタン
-    local btnOpApply = win:CreateChildWidget("button", "jpchatSP_opApply", 0, true)
-    btnOpApply:SetExtent(50, ROW_H - 2)
-    btnOpApply:AddAnchor("TOPLEFT", win, COL_APPLY, y + 1)
-    btnOpApply:SetText("適用")
-    btnOpApply:SetHandler("OnClick", function()
+    -- 透過率の適用処理（共通「適用」ボタンから呼ばれる）。Save はしない。
+    applyOpacity = function()
         local v = ParseOpacity(eOp:GetText())
         if v == nil then
             api.Log:Err("[jpchat] 透過率は 0.10〜1.00 で入力してください")
-            return
+            return false
         end
         if onOpacityChanged then onOpacityChanged(v) end
         -- 設定画面の背景も更新
         if spBg then spBg:SetColor(0.06, 0.06, 0.10, v) end
         eOp:SetText(string.format("%.2f", v))
-    end)
+        return true
+    end
 
     -- Reset ボタン
     local btnOpReset = win:CreateChildWidget("button", "jpchatSP_opReset", 0, true)
@@ -340,20 +509,17 @@ function M.Open()
         fsHint.style:SetColor(0.5, 0.5, 0.5, 1)
     end
 
-    -- Apply ボタン
-    local btnFsApply = win:CreateChildWidget("button", "jpchatSP_fsApply", 0, true)
-    btnFsApply:SetExtent(50, ROW_H - 2)
-    btnFsApply:AddAnchor("TOPLEFT", win, COL_APPLY, y + 1)
-    btnFsApply:SetText("適用")
-    btnFsApply:SetHandler("OnClick", function()
+    -- フォントサイズの適用処理（共通「適用」ボタンから呼ばれる）。Save はしない。
+    applyFontSize = function()
         local v = tonumber(eFs:GetText())
         if v == nil then
             api.Log:Err("[jpchat] フォントサイズは数値で入力してください")
-            return
+            return false
         end
         if onFontSizeChanged then onFontSizeChanged(v) end
         eFs:SetText(tostring(v))
-    end)
+        return true
+    end
 
     -- Reset ボタン
     local btnFsReset = win:CreateChildWidget("button", "jpchatSP_fsReset", 0, true)
@@ -381,84 +547,83 @@ function M.Open()
         rpLbl.style:SetColor(0.8, 0.8, 0.8, 1)
     end
 
-    local curX, curY = settings.GetRaidPos()
-
-    -- X 入力欄
-    local eRX = W_CTRL.CreateEdit("jpchatSP_rpX", win)
-    eRX:SetExtent(50, 18)
-    eRX:SetText(tostring(curX))
-    eRX:AddAnchor("TOPLEFT", win, 105, y + 3)
-
-    -- Y 入力欄
-    local eRY = W_CTRL.CreateEdit("jpchatSP_rpY", win)
-    eRY:SetExtent(50, 18)
-    eRY:SetText(tostring(curY))
-    eRY:AddAnchor("TOPLEFT", win, 160, y + 3)
-
-    -- 説明ラベル
+    -- 説明ラベル（操作方法の案内）
     local rpHint = win:CreateChildWidget("label", "jpchatSP_rpHint", 0, true)
-    rpHint:SetExtent(70, ROW_H)
-    rpHint:AddAnchor("TOPLEFT", win, 215, y)
-    rpHint:SetText("(X, Y)")
+    rpHint:SetExtent(160, ROW_H)
+    rpHint:AddAnchor("TOPLEFT", win, 105, y)
+    rpHint:SetText("Shift+ドラッグで移動")
     if rpHint.style then
         rpHint.style:SetAlign(ALIGN.LEFT)
         rpHint.style:SetColor(0.5, 0.5, 0.5, 1)
     end
 
-    -- プレビューボタン（COL_PREVIEW付近）
-    local btnRpPrev = win:CreateChildWidget("button", "jpchatSP_rpPrev", 0, true)
-    btnRpPrev:SetExtent(44, ROW_H - 2)
-    btnRpPrev:AddAnchor("TOPLEFT", win, COL_PREVIEW - 8, y + 1)
-    btnRpPrev:SetText("確認")
-    btnRpPrev:SetHandler("OnClick", function()
-        -- 現在入力中の位置を一時適用してプレビュー表示
-        local vx = tonumber(eRX:GetText())
-        local vy = tonumber(eRY:GetText())
-        if vx and vy and onRaidPosChanged then onRaidPosChanged(vx, vy) end
-        if onRaidPreview then onRaidPreview() end
-    end)
-
-    -- Apply ボタン
-    local btnRpApply = win:CreateChildWidget("button", "jpchatSP_rpApply", 0, true)
-    btnRpApply:SetExtent(50, ROW_H - 2)
-    btnRpApply:AddAnchor("TOPLEFT", win, COL_APPLY, y + 1)
-    btnRpApply:SetText("適用")
-    btnRpApply:SetHandler("OnClick", function()
-        local vx = tonumber(eRX:GetText())
-        local vy = tonumber(eRY:GetText())
-        if vx == nil or vy == nil then
-            api.Log:Err("[jpchat] 位置は数値で入力してください")
-            return
+    -- 位置調整トグルボタン: オン中はサンプルを出しっぱなしにして Shift+ドラッグで移動
+    raidAdjusting = false
+    local btnRpAdjust = win:CreateChildWidget("button", "jpchatSP_rpAdjust", 0, true)
+    btnRpAdjust:SetExtent(64, ROW_H - 2)
+    btnRpAdjust:AddAnchor("TOPLEFT", win, COL_APPLY - 14, y + 1)
+    btnRpAdjust:SetText("位置調整")
+    btnRpAdjust:SetHandler("OnClick", function()
+        raidAdjusting = not raidAdjusting
+        if raidAdjusting then
+            btnRpAdjust:SetText("調整終了")
+            if onRaidAdjustStart then onRaidAdjustStart() end
+        else
+            btnRpAdjust:SetText("位置調整")
+            if onRaidAdjustStop then onRaidAdjustStop() end
         end
-        settings.SetRaidPos(vx, vy)
-        settings.Save()
-        if onRaidPosChanged then onRaidPosChanged(vx, vy) end
-        if onRaidPreview then onRaidPreview() end
     end)
 
-    -- Reset ボタン
+    -- Reset ボタン: 位置を既定に戻して貼り直す
     local btnRpReset = win:CreateChildWidget("button", "jpchatSP_rpReset", 0, true)
     btnRpReset:SetExtent(44, ROW_H - 2)
     btnRpReset:AddAnchor("TOPLEFT", win, COL_RESET, y + 1)
     btnRpReset:SetText("初期化")
     btnRpReset:SetHandler("OnClick", function()
-        local dx, dy = settings.GetDefaultRaidPos()
-        settings.SetRaidPos(dx, dy)
+        if onRaidReset then onRaidReset() end
+    end)
+
+    -- ============================================================================
+    -- 共通「適用」ボタン（色・透過率・フォントサイズをまとめて適用）
+    -- ============================================================================
+    y = y + ROW_H + 8
+
+    local btnApplyAll = win:CreateChildWidget("button", "jpchatSP_applyAll", 0, true)
+    btnApplyAll:SetExtent(120, ROW_H)
+    btnApplyAll:AddAnchor("TOP", win, "TOP", 0, y)
+    btnApplyAll:SetText("適用")
+    btnApplyAll:SetHandler("OnClick", function()
+        -- 各項目を順に適用する。入力が不正な項目は各 apply 内で false を返して
+        -- スキップされる（正しい項目だけ反映される）。
+        for _, k in ipairs(settings.GetAllKeys()) do
+            local row = sRows[k]
+            if row and row.apply then row.apply() end
+        end
+        if applyOpacity  then applyOpacity()  end
+        if applyFontSize then applyFontSize() end
+
+        -- メインウィンドウの色を再描画（色変更の反映）
+        if onChanged then onChanged() end
+
+        -- 変更をまとめて1回だけ保存する
         settings.Save()
-        eRX:SetText(tostring(dx))
-        eRY:SetText(tostring(dy))
-        if onRaidPosChanged then onRaidPosChanged(dx, dy) end
-        if onRaidPreview then onRaidPreview() end
     end)
 end
 
 function M.Shutdown()
+    -- 位置調整モードが残っていれば止めておく（フラグ整合のため）
+    raidAdjusting = false
+
+    -- 設定ウィンドウはメインウィンドウの子。メインウィンドウ（親）を Free すると
+    -- 一緒に解放されるため、ここでは個別 Free せず参照を手放すだけにする。
+    -- パレットも win の子なので参照を手放すだけでよい（次回 Open 時に再生成される）。
     if win then
-        win:Show(false)
-        api.Interface:Free(win)
-        win   = nil
-        sRows = {}
+        pcall(function() win:Show(false) end)
     end
+    win              = nil
+    sRows            = {}
+    palettePopup     = nil
+    paletteTargetKey = nil
 end
 
 return M
