@@ -25,6 +25,7 @@ local DEFAULT_OPACITY = 0.92   -- ウィンドウ背景の不透明度デフォ�
 local DEFAULT_FONTSIZE = 13    -- デフォルトフォントサイズ（FONT_SIZE.MIDDLE = 13）
 local DEFAULT_RAID_X   = 0     -- RaidLeaderオーバーレイのXオフセット（TOP基準）
 local DEFAULT_RAID_Y   = 80    -- RaidLeaderオーバーレイのYオフセット（TOP基準）
+local DEFAULT_SEND_LANG = "en" -- 送信翻訳の翻訳先言語（"en"=英語, "ko"=韓国語）
 
 -- 実行時テーブル（デフォルトをコピーして使う）
 local colors   = {}
@@ -34,6 +35,7 @@ local visible  = {}  -- チャンネルキー → bool（true=表示、false=非
 local winPos   = nil -- ウィンドウ位置・サイズ { x, y, w, h } （nil = デフォルト位置）
 local raidX    = DEFAULT_RAID_X  -- RaidLeaderオーバーレイXオフセット
 local raidY    = DEFAULT_RAID_Y  -- RaidLeaderオーバーレイYオフセット
+local sendLang = DEFAULT_SEND_LANG -- 送信翻訳の翻訳先言語コード
 npcList = {
 --ルル
 ["Auctioneer"] = true,
@@ -61,7 +63,7 @@ end
 local M = {}
 
 function M.Save()
-    api.File:Write(SAVE_PATH, { colors = colors, opacity = opacity, visible = visible, winPos = winPos, fontSize = fontSize, npcList = npcList, raidX = raidX, raidY = raidY })
+    api.File:Write(SAVE_PATH, { colors = colors, opacity = opacity, visible = visible, winPos = winPos, fontSize = fontSize, npcList = npcList, raidX = raidX, raidY = raidY, sendLang = sendLang })
 end
 
 function M.Load()
@@ -109,6 +111,10 @@ function M.Load()
     -- RaidLeaderオーバーレイ位置
     if type(data.raidX) == "number" then raidX = data.raidX end
     if type(data.raidY) == "number" then raidY = data.raidY end
+    -- 送信翻訳の翻訳先言語（既知の言語コードのみ受け入れる）
+    if data.sendLang == "en" or data.sendLang == "ko" then
+        sendLang = data.sendLang
+    end
 end
 
 -- ============================================================================
@@ -196,6 +202,25 @@ end
 
 function M.GetDefaultRaidPos()
     return DEFAULT_RAID_X, DEFAULT_RAID_Y
+end
+
+-- ============================================================================
+-- 送信翻訳の翻訳先言語の取得 / 設定
+-- ============================================================================
+
+-- 戻り値: 言語コード文字列（"en" または "ko"）
+function M.GetSendLang()
+    return sendLang
+end
+
+function M.SetSendLang(lang)
+    if lang == "en" or lang == "ko" then
+        sendLang = lang
+    end
+end
+
+function M.GetDefaultSendLang()
+    return DEFAULT_SEND_LANG
 end
 
 -- ============================================================================

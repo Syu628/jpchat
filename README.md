@@ -17,9 +17,7 @@ Addon/
     ├── npc_list.lua            # NPC名リスト（Git共有管理）
     ├── dictionary.txt          # 辞書ファイル（Git共有管理）
     ├── JpChatTranslator.exe    # 翻訳エンジン（単体実行ファイル）
-    ├── JpChatLlm.dll           # ローカルLLM推論エンジン（Vulkan GPU対応）
     ├── deepl_api_key.txt       # DeepL APIキー（自動生成、Git管理外）
-    ├── llm_settings.txt        # ローカルLLM設定（自動生成、Git管理外）
     ├── heartbeat.lua           # 翻訳エンジン状態（自動生成、Git管理外）
     ├── input.lua               # Lua→翻訳エンジン 通信ファイル（自動生成）
     └── output.lua              # 翻訳エンジン→Lua 通信ファイル（自動生成）
@@ -87,69 +85,6 @@ GUIウィンドウが表示されれば起動成功です。
 4. OK → exe を再起動
 
 GUIウィンドウ上部の「Google」「DeepL」ボタンでモードを切り替えられます。
-
-### ローカルLLM 翻訳
-- インターネット不要、完全オフラインで翻訳
-- プライバシー重視（テキストが外部に送信されない）
-- Vulkan 対応で NVIDIA / AMD / Intel GPU をサポート
-- `JpChatLlm.dll` による内蔵推論（外部アプリ不要）
-
-#### ローカルLLM のセットアップ
-
-##### 1. 翻訳用モデルのダウンロード
-
-GGUF 形式のモデルを用意します。
-
-**推奨モデル: Qwen2.5-7B-Instruct Q4_K_M**
-
-1. 以下のページにアクセス:  
-   https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF
-2. 「Files and versions」タブから **Q4_K_M** をダウンロード（約4.5GB）
-3. 任意のフォルダに保存（例: `E:\LLM\qwen2.5-7b-instruct-q4_k_m.gguf`）
-
-| モデル | サイズ | 推奨環境 |
-|--------|--------|----------|
-| Qwen2.5-7B-Instruct Q4_K_M | ~4.5GB | dGPU（推奨） |
-| Qwen2.5-14B-Instruct Q4_K_M | ~8.5GB | VRAM 16GB以上 |
-| Qwen2.5-3B-Instruct Q4_K_M | ~2.1GB | iGPU / CPU |
-
-##### 2. llm_settings.txt の設定
-
-初回起動時に `llm_settings.txt` が自動生成されます。`model_path` にダウンロードした GGUF ファイルのパスを記入してください。
-
-```
-model_path=E:\LLM\qwen2.5-7b-instruct-q4_k_m.gguf
-gpu_layers=999
-context_size=512
-threads=0
-system_prompt=Translate the following MMORPG chat message into natural Japanese. Output only the Japanese translation. Rules: Keep player names unchanged. Convert game locations to katakana. Use casual spoken Japanese. Never add explanations or notes.
-send_prompt=Translate the following Japanese message into natural English for an MMORPG game chat. Output only the English translation. Use casual gamer English. Never add explanations or notes.
-```
-
-| 設定 | 説明 |
-|------|------|
-| `model_path` | GGUF ファイルの絶対パス |
-| `gpu_layers` | GPU に載せるレイヤー数（999 = 全て GPU） |
-| `context_size` | コンテキストサイズ（512 で十分） |
-| `threads` | CPU スレッド数（0 = 自動検出） |
-| `system_prompt` | 受信翻訳（英/韓/露→日）のプロンプト |
-| `send_prompt` | 送信翻訳（日→英）のプロンプト |
-
-##### 3. 使用方法
-
-1. `JpChatTranslator.exe` を起動（モデルが自動ロードされる）
-2. GUIウィンドウ上部の「**LLM**」ボタンをクリックしてモードを切替
-
-> **注意:** `JpChatLlm.dll` が exe と同じフォルダに必要です。
-
-##### パフォーマンス目安
-
-| 環境 | モデル | チャット翻訳の応答時間 |
-|------|--------|----------------------|
-| RTX 3060 以上 | qwen2.5-7b | 0.5〜1.5秒 |
-| RX 6800 XT | qwen2.5-7b | 0.5〜1.5秒 |
-| RX 6800 XT | qwen2.5-14b | 1〜2秒 |
-| CPU のみ | qwen2.5-7b | 3〜5秒 |
 
 ---
 
@@ -259,7 +194,7 @@ return {
   アイテムリンク解決 → input.lua に書き出す
        ↓ (0.3秒ごとに監視)
   JpChatTranslator.exe が読み込む
-       ↓ 辞書置換 → Google/DeepL/ローカルLLM 翻訳
+       ↓ 辞書置換 → Google/DeepL 翻訳
   output.lua に翻訳結果を書き出す
        ↓ (0.1秒ごとにポーリング)
   Lua が読み込んでUIに表示
@@ -270,7 +205,7 @@ return {
 ## 翻訳エンジン（GUI）について
 
 - ダークテーマのステータスウィンドウが表示されます
-- 「Google」「DeepL」「LLM」ボタンでリアルタイムにモード切替可能
+- 「Google」「DeepL」ボタンでリアルタイムにモード切替可能
 - 受信メッセージ（黄色）、翻訳結果（水色）、送信（緑）がリアルタイムで確認できます
 - 翻訳数カウンターが右上に表示されます
 - ウィンドウを閉じると翻訳エンジンが停止します
@@ -284,10 +219,8 @@ return {
 | `npc_list.lua` | ✅ | NPC名リスト（複数人で追加・共有） |
 | `dictionary.txt` | ✅ | 辞書ファイル（共有） |
 | `JpChatTranslator.exe` | ✅ (LFS) | 翻訳エンジン |
-| `JpChatLlm.dll` | ✅ (LFS) | LLM推論エンジン（Vulkan GPU対応） |
 | `jpchat_settings.lua` | ❌ | ユーザー個別設定（初回起動時に自動生成） |
 | `deepl_api_key.txt` | ❌ | APIキー（初回起動時に自動生成） |
-| `llm_settings.txt` | ❌ | ローカルLLM設定（初回起動時に自動生成） |
 | `heartbeat.lua` | ❌ | 翻訳エンジン状態（初回起動時に自動生成） |
 | `input.lua` 等 | ❌ | 通信ファイル（自動生成） |
 
@@ -303,9 +236,7 @@ return {
 | 「このアプリはお使いのPCでは実行できません」 | Git LFS 経由でダウンロードした場合、Releases ページから直接ダウンロード |
 | DeepL が使えない | `deepl_api_key.txt` の配置か環境変数 `DEEPL_API_KEY` を確認 |
 | Google 翻訳が 429 エラー | レート制限。しばらく待つか DeepL に切り替え |
-| LLM 翻訳が動作しない | `JpChatLlm.dll` が exe と同じフォルダにあるか確認。`llm_settings.txt` の `model_path` を確認 |
-| LLM の翻訳が遅い | `gpu_layers=999` で GPU を活用。より小型のモデルに変更 |
-| 翻訳が遅い・失敗する | インターネット接続を確認（LLMモード以外） |
+| 翻訳が遅い・失敗する | インターネット接続を確認 |
 | アイテム名が Item#数字 で表示される | ゲーム内のアイテムデータ読み込み前に受信した場合。再ログインで改善 |
 
 ---

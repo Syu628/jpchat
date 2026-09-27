@@ -328,12 +328,50 @@ local function readSendTranslation()
     if data == nil then return end
     if data.chatMsg == nil or data.chatMsg == "" then return end
 
-    local translated = data.chatMsg
-    if translated == lastSendOutput then return end
-    lastSendOutput = translated
+    local raw = data.chatMsg
+    if raw == lastSendOutput then return end
+    lastSendOutput = raw
 
-    -- 翻訳結果をUIウィンドウに表示（クリップボードにコピー済み）
-    ui.AddMessage("[Send]", "\226\134\146", "Say", translated, "")
+    -- send_output を "|||" で分割する
+    local parts = {}
+    do
+        local s = raw
+        while true do
+            local a, b = string.find(s, "|||", 1, true)
+            if a then
+                table.insert(parts, string.sub(s, 1, a - 1))
+                s = string.sub(s, b + 1)
+            else
+                table.insert(parts, s)
+                break
+            end
+        end
+    end
+
+    -- フォーマット判定:
+    --   新: "言語コード|||翻訳文[|||逆翻訳日本語]"（先頭が en / ko）
+    --   旧: "翻訳文[|||逆翻訳日本語]"（先頭が言語コードでない）
+    local langCode, transText, backJa
+    if parts[1] == "en" or parts[1] == "ko" then
+        langCode  = parts[1]
+        transText = parts[2] or ""
+        backJa    = parts[3] or ""
+    else
+        langCode  = "en"   -- 旧フォーマットは英語送信とみなす
+        transText = parts[1] or ""
+        backJa    = parts[2] or ""
+    end
+
+    -- 翻訳先言語に応じたラベル
+    local sendLabel = (langCode == "ko") and "[Send:KO]" or "[Send:EN]"
+
+    -- 翻訳文を表示（クリップボードにコピー済み）。原文ツールチップに逆翻訳日本語を出す
+    ui.AddMessage(sendLabel, "", "Say", transText, backJa)
+
+    -- 逆翻訳日本語があれば、翻訳文が何と伝わるかの確認用に併せて表示する
+    if backJa ~= nil and backJa ~= "" then
+        ui.AddMessage("[Send:JA]", "", "Say", backJa, transText)
+    end
 
     -- 読んだら空にする
     api.File:Write(SEND_OUTPUT_FILE, { chatMsg = "" })
@@ -416,9 +454,14 @@ local function OnLoad()
     )
 
     -- 送信機能のコールバックをUIに注入
-    ui.SetSendHandler(function(text)
-        -- 日本語テキストを send_input.lua に書き出す → 翻訳エンジンが翻訳して返す
-        api.File:Write(SEND_INPUT_FILE, { chatMsg = text })
+    ui.SetSendHandler(function(text, lang)
+        -- 翻訳先言語を先頭に埋め込んで send_input.lua に書き出す → 翻訳エンジンが翻訳して返す
+        -- 形式: "[[JPLANG:xx]]日本語テキスト"（xx = en / ko）。
+        -- 未指定・不正な場合は英語(en)にフォールバックする。
+        local langCode = "en"
+        if lang == "en" or lang == "ko" then langCode = lang end
+        local payload = "[[JPLANG:" .. langCode .. "]]" .. text
+        api.File:Write(SEND_INPUT_FILE, { chatMsg = payload })
     end)
 
     -- NPC登録コールバックをUIに注入

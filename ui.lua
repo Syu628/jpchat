@@ -433,6 +433,7 @@ local UpdateInternal
 local settingsPageOpen = nil
 local sendHandler      = nil  -- 送信コールバック（main.lua から注入）
 local sendEditWidget   = nil  -- 入力欄（リサイズ連動用）
+local sendLangCombo    = nil  -- 翻訳先言語プルダウン（リサイズ連動用）
 local npcRegisterHandler = nil -- NPC登録コールバック（main.lua から注入）
 local chatEventHandler = nil  -- CHAT_MESSAGE 受信コールバック（main.lua から注入）
 local updateHandler    = nil  -- 毎フレーム更新コールバック（main.lua から注入）
@@ -559,20 +560,59 @@ local function CreateFooter()
         RedrawBody()
     end)
 
-    -- 下段: テキスト入力欄 + Send ボタン（日本語→英語翻訳送信用）
+    -- 下段: テキスト入力欄 + 翻訳先言語プルダウン（日本語→選択言語 翻訳送信用）
+    -- 入力欄で Enter を押すと、プルダウンで選んだ言語へ翻訳して送信する。
     local sendEdit = W_CTRL.CreateEdit("jpchatSendEdit", footer)
     sendEdit:SetHeight(20)
     sendEdit:AddAnchor("BOTTOMLEFT", footer, 6, -4)
-    sendEdit:AddAnchor("BOTTOMRIGHT", footer, -76, -4)
+    sendEdit:AddAnchor("BOTTOMRIGHT", footer, -96, -4)
     sendEdit:SetText("")
     sendEditWidget = sendEdit  -- リサイズ連動用に保持
+
+    -- 翻訳先言語プルダウン（コンボボックス）。表示順とインデックスの対応:
+    --   1 = 英語(en), 2 = 韓国語(ko)
+    local LANG_ITEMS = { "英語", "韓国語" }
+    local LANG_CODES = { "en", "ko" }
+
+    local langCombo = api.Interface:CreateComboBox(footer)
+    langCombo:SetExtent(82, 22)
+    langCombo:AddAnchor("BOTTOMRIGHT", footer, -8, -4)
+    langCombo.dropdownItem = LANG_ITEMS
+
+    -- 保存済みの言語を初期選択に反映する
+    local initIdx = 1
+    if settings and settings.GetSendLang then
+        local saved = settings.GetSendLang()
+        for i, code in ipairs(LANG_CODES) do
+            if code == saved then initIdx = i break end
+        end
+    end
+    langCombo:Select(initIdx)
+    sendLangCombo = langCombo  -- リサイズ連動用に保持
+
+    -- 現在プルダウンで選ばれている言語コードを返す
+    local function getSelectedLang()
+        local idx = 1
+        pcall(function() idx = langCombo:GetSelectedIndex() end)
+        if idx == nil or idx < 1 or idx > #LANG_CODES then
+            idx = langCombo.selctedIndex or 1  -- ゲーム側の綴りに合わせたフォールバック
+        end
+        if idx < 1 or idx > #LANG_CODES then idx = 1 end
+        return LANG_CODES[idx]
+    end
 
     -- 送信処理を共通関数化
     local function doSend()
         local text = sendEdit:GetText()
         if text == nil or text == "" then return end
+        local lang = getSelectedLang()
+        -- 選択言語を設定に保存（次回起動時に復元）
+        if settings and settings.SetSendLang then
+            settings.SetSendLang(lang)
+            if settings.Save then settings.Save() end
+        end
         if sendHandler then
-            sendHandler(text)
+            sendHandler(text, lang)
         end
         sendEdit:SetText("")
     end
@@ -581,14 +621,6 @@ local function CreateFooter()
     sendEdit:SetHandler("OnEnterPressed", function()
         doSend()
         sendEdit:ClearFocus()
-    end)
-
-    local btnSend = footer:CreateChildWidget("button", "jpchatSend", 0, true)
-    btnSend:SetExtent(62, 20)
-    btnSend:AddAnchor("BOTTOMRIGHT", footer, -8, -4)
-    btnSend:SetText("翻訳")
-    btnSend:SetHandler("OnClick", function()
-        doSend()
     end)
 end
 
